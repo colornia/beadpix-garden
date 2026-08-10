@@ -1,5 +1,6 @@
 use beadpix::{Canvas, Palette, Rgb, Sprite};
 
+use crate::decor::{decor_anchors, Decoration};
 use crate::garden::{Biome, Garden, Plant, Stage};
 use crate::weather::{Kind, Weather};
 
@@ -182,6 +183,7 @@ impl Scene {
         time: f32,
         dt: f32,
         moving: Option<usize>,
+        decor_cursor: Option<usize>,
     ) {
         let w = canvas.width();
         let h = canvas.height();
@@ -198,11 +200,31 @@ impl Scene {
             Biome::Abyss => self.bg_abyss(canvas, weather, time, seed, dt),
         }
 
-        // --- 植株（按锚点顺序绘制：后排先画，前排自然遮挡）---
         // 天时科（月见花/日晷花）的开合绑定这个值
         let dark0 = weather.darkness();
         // 雷纹花的发芽与电弧绑定这个值
         let raining0 = weather.kind == Kind::Rain;
+
+        // --- 布景：先于植株绘制，前排植株自然盖住它们 ---
+        let dpts = decor_anchors(biome, w, h, seed);
+        for (i, d) in garden.decor.iter().enumerate() {
+            let Some(d) = d else { continue };
+            let (dx, dy) = dpts[i.min(dpts.len() - 1)];
+            let dwind = weather.wind() * gust(time, dx);
+            self.draw_decor(canvas, *d, dx, dy, time, dwind, dark0, &mut lights);
+        }
+        // 布景模式下高亮当前槽位
+        if let Some(sel) = decor_cursor {
+            if let Some(&(dx, dy)) = dpts.get(sel) {
+                let blink = ((time * 4.0).sin() * 0.5 + 0.5) * 220.0;
+                for k in -2..=2i32 {
+                    canvas.blend(dx + k, dy + 2, Rgb::new(255, 240, 180), blink as u8);
+                }
+                canvas.blend(dx, dy + 3, Rgb::new(255, 240, 180), blink as u8);
+            }
+        }
+
+        // --- 植株（按锚点顺序绘制：后排先画，前排自然遮挡）---
         let pts = anchors(biome, w, h, seed, garden.plots.len());
         // (x, y, 主色, 发光基因, 品种, vitality)
         let mut blooms: Vec<(i32, i32, Rgb, bool, u8, f32)> = Vec::new();
@@ -1735,6 +1757,132 @@ impl Scene {
             Rgb::new(250, 234, 168),
         );
         Some((cx, ty, petal, genes.glow, 13))
+    }
+
+    /// 布景装饰。石灯笼会把自己登记成真实光源——布景因此不只是"贴图"，
+    /// 它真的改变夜里的花园长什么样（系统五：花园即画布）。
+    fn draw_decor(
+        &self,
+        canvas: &mut Canvas,
+        d: Decoration,
+        x: i32,
+        y: i32,
+        time: f32,
+        wind: f32,
+        dark: f32,
+        lights: &mut Vec<LightSource>,
+    ) {
+        match d {
+            Decoration::Lantern => {
+                let stone = Rgb::new(126, 124, 118);
+                let stone_d = Rgb::new(92, 90, 86);
+                // 基座 → 柱 → 灯室 → 顶盖
+                for dx in -2..=2i32 {
+                    canvas.set(x + dx, y, stone_d);
+                }
+                for i in 1..=3 {
+                    canvas.set(x, y - i, stone);
+                    canvas.set(x + 1, y - i, stone_d);
+                }
+                // 灯室：夜里内部亮起暖光
+                let lit = dark.clamp(0.0, 1.0);
+                let flame = Rgb::new(255, 214, 130).lerp(Rgb::new(90, 84, 72), 1.0 - lit);
+                for dx in -1..=1i32 {
+                    for dy in 4..=5i32 {
+                        canvas.set(x + dx, y - dy, flame);
+                    }
+                }
+                for dx in -2..=2i32 {
+                    canvas.set(x + dx, y - 6, stone);
+                    if dx.abs() < 2 {
+                        canvas.set(x + dx, y - 7, stone_d);
+                    }
+                }
+                if lit > 0.15 {
+                    // 真实光源：焰心随时间轻微跳动
+                    let flicker = 0.85 + ((time * 5.3 + x as f32).sin() * 0.5 + 0.5) * 0.3;
+                    let s = lit * flicker;
+                    lights.push((x, y - 5, 14, (0.95 * s, 0.72 * s, 0.34 * s)));
+                }
+            }
+            Decoration::Windchime => {
+                let post = Rgb::new(112, 84, 58);
+                for i in 0..=6 {
+                    canvas.set(x, y - i, post);
+                }
+                let arm = wind.clamp(-1.5, 1.5);
+                let bx = x + 2 + (arm * 0.6).round() as i32;
+                canvas.set(x + 1, y - 6, post);
+                canvas.set(x + 2, y - 6, post);
+                // 三根管随风摆
+                for k in 0..3i32 {
+                    let sway = ((time * 2.1 + k as f32 * 1.3).sin() * arm * 1.2).round() as i32;
+                    let cx = bx + k - 1 + sway;
+                    for i in 1..=2 {
+                        canvas.set(cx, y - 5 + i, Rgb::new(196, 186, 150));
+                    }
+                }
+                // 风大时闪一下
+                if arm.abs() > 0.9 && (time * 3.0).fract() < 0.2 {
+                    canvas.blend(bx, y - 4, Rgb::new(255, 250, 220), 190);
+                }
+            }
+            Decoration::Birdbath => {
+                let stone = Rgb::new(150, 148, 140);
+                canvas.set(x, y, Rgb::new(104, 102, 96));
+                canvas.set(x, y - 1, stone);
+                for dx in -2..=2i32 {
+                    canvas.set(x + dx, y - 2, stone);
+                }
+                // 盆里的水：映一点天光，微微起伏
+                for dx in -1..=1i32 {
+                    let ripple = ((time * 1.7 + dx as f32).sin() * 0.5 + 0.5) * 40.0;
+                    let water = Rgb::new(120, 176, 200).lerp(Rgb::new(40, 60, 96), dark);
+                    canvas.set(x + dx, y - 3, water.tint(1.0 + ripple / 255.0, 1.0, 1.0));
+                }
+                // 白天偶尔落一只小鸟
+                if dark < 0.4 && (time * 0.23 + x as f32 * 0.7).fract() < 0.35 {
+                    let hop = ((time * 4.0).sin() > 0.0) as i32;
+                    canvas.set(x + 1, y - 4 - hop, Rgb::new(86, 74, 64));
+                    canvas.set(x + 2, y - 4 - hop, Rgb::new(120, 104, 88));
+                }
+            }
+            Decoration::Fence => {
+                let wood = Rgb::new(146, 114, 76);
+                let wood_d = Rgb::new(112, 86, 56);
+                for dx in -4..=4i32 {
+                    if dx % 3 == 0 {
+                        for i in 0..=3 {
+                            canvas.set(x + dx, y - i, if i == 3 { wood } else { wood_d });
+                        }
+                    }
+                }
+                for dx in -4..=4i32 {
+                    canvas.set(x + dx, y - 1, wood);
+                    canvas.set(x + dx, y - 3, wood_d);
+                }
+            }
+            Decoration::Pond => {
+                // 椭圆水面：映天光，夜里映月色
+                let surface = Rgb::new(96, 158, 190).lerp(Rgb::new(26, 40, 78), dark);
+                for dy in -2..=2i32 {
+                    let hw = (5.0 * (1.0 - (dy as f32 / 3.0).powi(2)).max(0.0).sqrt()) as i32;
+                    for dx in -hw..=hw {
+                        canvas.set(x + dx, y + dy - 1, surface);
+                    }
+                }
+                // 水面波光
+                for k in 0..3i32 {
+                    let px = x + ((time * 0.9 + k as f32 * 2.1).sin() * 3.0) as i32;
+                    canvas.blend(
+                        px,
+                        y - 1 + (k % 2),
+                        Rgb::new(210, 235, 250),
+                        (90.0 * (1.0 - dark * 0.6)) as u8,
+                    );
+                }
+            }
+        }
     }
 
     /// 雷纹花（14）：种子期在土里静静等雨（画成一颗带电纹的种壳），

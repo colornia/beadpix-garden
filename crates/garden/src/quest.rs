@@ -77,6 +77,9 @@ pub struct Quest {
     pub reward_compost: u32,
     /// 是否附赠一颗稀有种
     pub reward_seed: bool,
+    /// 附赠的装饰——布景是终局，装饰只从这里来（不卖，见 decor.rs 的经济纪律）
+    #[serde(default)]
+    pub reward_decor: Option<crate::decor::Decoration>,
     pub done: bool,
 }
 
@@ -159,6 +162,7 @@ pub fn weekly_quests(week: u64, count: usize) -> Vec<Quest> {
                 _ => 20,
             },
             reward_seed: tier >= 1,
+            reward_decor: Some(crate::decor::Decoration::reward_for_tier(tier)),
             done: false,
         });
     }

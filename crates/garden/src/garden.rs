@@ -147,6 +147,12 @@ pub struct Garden {
     /// 玩家钉住的目标表型（定向育种的参照）
     #[serde(default)]
     pub pinned: Option<Genes>,
+    /// 布景：已摆放的装饰（槽位 → 装饰），系统五"花园即画布"
+    #[serde(default)]
+    pub decor: Vec<Option<crate::decor::Decoration>>,
+    /// 未摆放的装饰库存（委托奖励发到这里）
+    #[serde(default)]
+    pub decor_stock: Vec<crate::decor::Decoration>,
     /// 当前活跃委托（每真实周轮换）
     #[serde(default)]
     pub quests: Vec<crate::quest::Quest>,
@@ -178,6 +184,8 @@ impl Garden {
             compost: 0,
             breeding_log: Vec::new(),
             pinned: None,
+            decor: vec![None; crate::decor::DECOR_SLOTS],
+            decor_stock: Vec::new(),
             quests: crate::quest::weekly_quests(crate::quest::current_week(), 3),
             quest_week: crate::quest::current_week(),
             quests_done: 0,
@@ -200,6 +208,7 @@ impl Garden {
             self.quests_done += 1;
             let reward = self.quests[i].reward_compost;
             let seed_reward = self.quests[i].reward_seed;
+            let decor_reward = self.quests[i].reward_decor;
             let title = self.quests[i].title.clone();
             self.compost += reward;
             let mut extra = String::new();
@@ -209,6 +218,10 @@ impl Garden {
                 gift.petal_shape = [6u8, 7, 8, 9][rng.gen_range(0..4)];
                 extra = format!("，以及一颗稀有种「{}」", crate::genetics::display_name(&gift));
                 self.seeds.push(gift);
+            }
+            if let Some(d) = decor_reward {
+                extra.push_str(&format!("，还有一件布景「{}」[D 摆放]", d.name()));
+                self.decor_stock.push(d);
             }
             completed.push(format!(
                 "✦ 委托达成「{}」！获得 {} 堆肥{}。",
@@ -343,6 +356,27 @@ impl Garden {
         }
         self.apply_neighbor_effects(dt, weather);
         self.last_tick = now();
+    }
+
+    /// 把库存里的下一件装饰摆进槽位；槽位已有东西则先收回库存（相当于替换）。
+    /// 返回摆上的那件。
+    pub fn place_decor(&mut self, slot: usize) -> Option<crate::decor::Decoration> {
+        if slot >= self.decor.len() || self.decor_stock.is_empty() {
+            return None;
+        }
+        if let Some(old) = self.decor[slot].take() {
+            self.decor_stock.push(old);
+        }
+        let d = self.decor_stock.remove(0);
+        self.decor[slot] = Some(d);
+        Some(d)
+    }
+
+    /// 收回槽位里的装饰到库存。
+    pub fn take_decor(&mut self, slot: usize) -> Option<crate::decor::Decoration> {
+        let d = self.decor.get_mut(slot)?.take()?;
+        self.decor_stock.push(d);
+        Some(d)
     }
 
     /// 陨星花种子：流星带来的唯一产物，天生自发光。
@@ -655,7 +689,10 @@ impl Garden {
 
     pub fn load(path: &Path) -> Option<Garden> {
         let text = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&text).ok()
+        let mut g: Garden = serde_json::from_str(&text).ok()?;
+        // 旧存档没有 decor 字段，serde 给的是空 Vec——补齐槽位
+        g.decor.resize(crate::decor::DECOR_SLOTS, None);
+        Some(g)
     }
 }
 
@@ -914,6 +951,8 @@ mod tests {
             compost: a.compost,
             breeding_log: a.breeding_log.clone(),
             pinned: None,
+            decor: a.decor.clone(),
+            decor_stock: a.decor_stock.clone(),
             quests: a.quests.clone(),
             quest_week: a.quest_week,
             quests_done: a.quests_done,
@@ -1024,6 +1063,45 @@ mod tests {
         assert!(
             g.plots[0].as_ref().unwrap().progress > 0.0,
             "storm seed should sprout once it rains"
+        );
+    }
+
+    #[test]
+    fn decor_places_takes_and_swaps_without_ever_vanishing() {
+        use crate::decor::Decoration;
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        assert_eq!(g.decor.len(), crate::decor::DECOR_SLOTS);
+
+        // 库存空时摆不上任何东西
+        assert!(g.place_decor(0).is_none());
+
+        g.decor_stock.push(Decoration::Lantern);
+        g.decor_stock.push(Decoration::Pond);
+        assert_eq!(g.place_decor(0), Some(Decoration::Lantern));
+        assert_eq!(g.decor[0], Some(Decoration::Lantern));
+
+        // 往已占用的位置再摆：旧的退回库存，不会凭空消失
+        assert_eq!(g.place_decor(0), Some(Decoration::Pond));
+        assert!(g.decor_stock.contains(&Decoration::Lantern));
+
+        // 收起后回到库存，槽位清空
+        assert_eq!(g.take_decor(0), Some(Decoration::Pond));
+        assert!(g.decor[0].is_none());
+        assert_eq!(g.decor_stock.len(), 2);
+        assert!(g.take_decor(0).is_none());
+    }
+
+    /// 经济纪律（坑 机制-1）：堆肥的唯一主用途是扩张，布景只能靠委托拿——
+    /// 一旦能买，cozy 就滑向手游农场。
+    #[test]
+    fn decor_cannot_be_bought_with_compost() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.compost = 9_999;
+        assert!(
+            g.decor_stock.is_empty() && g.place_decor(0).is_none(),
+            "compost must never convert into decorations"
         );
     }
 

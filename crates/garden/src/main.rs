@@ -1,4 +1,5 @@
 mod bmp;
+mod decor;
 mod garden;
 mod genetics;
 mod quest;
@@ -79,6 +80,8 @@ fn main() -> std::io::Result<()> {
     let mut hud_mode = 0u8;
     // 移植模式：Some(源地块)，再选一块地即完成搬迁/互换
     let mut moving: Option<usize> = None;
+    // 布景模式：Some(装饰槽位)——←→ 换槽位，回车摆放/收回
+    let mut decor_cursor: Option<usize> = None;
     // 花头位置：锚点上方株高处（蜜蜂和迸发粒子的目标点）
     let head_of = |garden: &Garden, i: usize| -> Option<(f32, f32)> {
         let pts = render::anchors(
@@ -118,12 +121,42 @@ fn main() -> std::io::Result<()> {
                 gallery = false;
                 renderer.invalidate();
             }
+        } else if let Some(slot) = decor_cursor {
+            // 布景模式：把花园当画布摆东西（系统五终局）
+            match key {
+                Some(KeyCode::Esc) | Some(KeyCode::Char('d')) | Some(KeyCode::Char('D')) => {
+                    decor_cursor = None;
+                    message = String::from("离开布景模式。");
+                }
+                Some(KeyCode::Left) => {
+                    decor_cursor = Some((slot + decor::DECOR_SLOTS - 1) % decor::DECOR_SLOTS)
+                }
+                Some(KeyCode::Right) => decor_cursor = Some((slot + 1) % decor::DECOR_SLOTS),
+                Some(KeyCode::Enter) => {
+                    message = match garden.place_decor(slot) {
+                        Some(d) => format!("在 {} 号位摆上了「{}」——{}。", slot + 1, d.name(), d.hint()),
+                        None => String::from("库存里没有可摆的布景了（完成委托可以获得）。"),
+                    };
+                }
+                Some(KeyCode::Backspace) | Some(KeyCode::Delete) => {
+                    message = match garden.take_decor(slot) {
+                        Some(d) => format!("收起了「{}」，放回库存。", d.name()),
+                        None => String::from("这个位置是空的。"),
+                    };
+                }
+                _ => {}
+            }
         } else {
             match key {
             Some(KeyCode::Esc) => break,
             Some(KeyCode::Char('b')) | Some(KeyCode::Char('B')) => {
                 gallery = true;
                 renderer.invalidate();
+            }
+            Some(KeyCode::Char('d')) | Some(KeyCode::Char('D')) => {
+                decor_cursor = Some(0);
+                moving = None;
+                message = String::from("布景模式：[←→]选位置 [回车]摆放 [退格]收起 [D]退出");
             }
             Some(KeyCode::Left) => selected = selected.saturating_sub(1),
             Some(KeyCode::Right) => selected = (selected + 1).min(garden.plots.len() - 1),
@@ -320,7 +353,16 @@ fn main() -> std::io::Result<()> {
         if gallery {
             scene.draw_gallery(&mut canvas, &garden, time);
         } else {
-            scene.draw(&mut canvas, &garden, &weather, selected, time, dt, moving);
+            scene.draw(
+                &mut canvas,
+                &garden,
+                &weather,
+                selected,
+                time,
+                dt,
+                moving,
+                decor_cursor,
+            );
         }
         renderer.present(&canvas, session.out(), 1, 1)?;
         if gallery {
@@ -336,6 +378,7 @@ fn main() -> std::io::Result<()> {
                 &message,
                 fast,
                 hud_mode,
+                decor_cursor,
             )?;
         }
 
@@ -416,7 +459,16 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
             w.clock = clock;
         }
         w.rainbow = rainbow;
-        scene.draw(&mut canvas, &g, &w, 2, 1.5, 0.033, None);
+        // 布景：石灯笼是真实光源，夜景里应该能看到它照亮周围
+        g.decor = vec![
+            Some(decor::Decoration::Lantern),
+            Some(decor::Decoration::Pond),
+            Some(decor::Decoration::Fence),
+            Some(decor::Decoration::Windchime),
+            Some(decor::Decoration::Lantern),
+            Some(decor::Decoration::Birdbath),
+        ];
+        scene.draw(&mut canvas, &g, &w, 2, 1.5, 0.033, None, None);
         let name = format!("garden_{}.bmp", tag);
         bmp::write_bmp(&Path::new(dir).join(&name), &canvas, 6)?;
         println!("wrote {}", name);
@@ -555,6 +607,7 @@ fn draw_hud(
     message: &str,
     fast: bool,
     hud_mode: u8,
+    decor_cursor: Option<usize>,
 ) -> std::io::Result<()> {
     // 杂交预览优先：当前块与右侧块都盛开时，显示子代预测范围
     let preview = garden.plots.get(selected).and_then(|s| s.as_ref()).and_then(|a| {
@@ -664,7 +717,25 @@ fn draw_hud(
         Some(c) => format!("{}", c),
         None => String::from("满"),
     };
-    let line1 = if hud_mode == 1 {
+    let line1 = if let Some(slot) = decor_cursor {
+        // 布景面板
+        let here = garden.decor.get(slot).and_then(|d| *d);
+        let stock: Vec<&str> = garden.decor_stock.iter().map(|d| d.name()).collect();
+        format!(
+            " ❖布景 {}/{} 号位: {} | 库存: {} | 完成委托可获得新布景",
+            slot + 1,
+            decor::DECOR_SLOTS,
+            match here {
+                Some(d) => format!("{}（{}）", d.name(), d.hint()),
+                None => String::from("空"),
+            },
+            if stock.is_empty() {
+                String::from("无")
+            } else {
+                stock.join("、")
+            },
+        )
+    } else if hud_mode == 1 {
         // 委托面板：脊椎——够得着又永远差一点的追逐
         let items: Vec<String> = garden
             .quests
@@ -698,10 +769,14 @@ fn draw_hud(
             info
         )
     };
-    let line2 = format!(
-        " [←→↑↓]选 [回车]种 [W]浇水 [H]收 [X]杂交 [M]移植 [P]钉 [C]堆肥 [E]扩张 [Q]委托 [B]图鉴 [Esc]退出 | {}",
-        message
-    );
+    let line2 = if decor_cursor.is_some() {
+        format!(" [←→]选位置 [回车]摆放 [退格]收起 [D]退出布景 | {}", message)
+    } else {
+        format!(
+            " [←→↑↓]选 [回车]种 [W]浇 [H]收 [X]杂交 [M]移植 [P]钉 [C]堆肥 [E]扩张 [D]布景 [Q]委托 [B]图鉴 [Esc]退出 | {}",
+            message
+        )
+    };
     let width = cols as usize;
     let out = session.out();
     write!(
