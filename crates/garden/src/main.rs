@@ -632,9 +632,10 @@ fn draw_hud(
             })
             .collect();
         format!(
-            " ✦本周委托(累计完成{}) {} | [Q]返回状态",
+            " ✦本周委托(累计完成{}) {} | 本周客座种:{} | [Q]返回状态",
             garden.quests_done,
-            items.join("  ")
+            items.join("  "),
+            genetics::variety_name(genetics::guest_variety(quest::current_week())),
         )
     } else {
         format!(

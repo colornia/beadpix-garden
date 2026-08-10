@@ -84,6 +84,13 @@ pub fn hue_name(hue: f32) -> &'static str {
     }
 }
 
+/// 本周客座品种：野生种子池里额外轮换的那一个。
+/// 只从"够得着"的常见/角色层里选——传说层始终得靠自己育出来。
+pub fn guest_variety(week: u64) -> u8 {
+    const GUESTS: [u8; 6] = [2, 3, 4, 5, 10, 11];
+    GUESTS[(week % GUESTS.len() as u64) as usize]
+}
+
 /// 子代预测：杂交前显示给玩家的遗传范围。
 /// 与 `Genes::cross` 共用同一套推导（那边 roll 具体值，这边给区间），
 /// 预览和结果才互相可信——这是"可规划"的基础。
@@ -136,12 +143,15 @@ impl Genes {
     /// 永远不发光，稀有科系（异界/炼金）只能靠杂交突变。
     pub fn wild(rng: &mut impl Rng, biome: crate::garden::Biome) -> Self {
         use crate::garden::Biome;
-        let pool: &[u8] = match biome {
+        let base: &[u8] = match biome {
             Biome::Meadow => &[0, 1, 4],
             Biome::Forest => &[0, 1, 5],
             Biome::Crevice => &[0, 1, 4],
             Biome::Abyss => &[10, 11],
         };
+        // 本周客座品种：每真实周轮换一次，给长期回访一个理由
+        let mut pool = base.to_vec();
+        pool.push(guest_variety(crate::quest::current_week()));
         Genes {
             hue: rng.gen_range(0.0..360.0),
             saturation: rng.gen_range(0.5..0.85),

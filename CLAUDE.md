@@ -9,10 +9,13 @@
   `sprite.rs` 索引色精灵；`terminal.rs` 终端守卫（含 Windows UTF-8 代码页设置）
 - `crates/garden`：花园挂机游戏（当前重心）。四群系（草甸/林间/石缝/深海，开局随机）、
   连续昼夜循环（`weather.rs` 的 clock，600 秒一天）、光照贴图系统（`render.rs` apply_lighting）、
-  五大科系 12 品种×8 色系=96 格图鉴、基因杂交（`genetics.rs`）、JSON 存档。
-  设计骨架见 `E:\desktop\beadpix_redesign_plan.md`（cozy 外壳 + 育种脊椎）：
+  六大科系 14 品种×8 色系=112 格图鉴、基因杂交（`genetics.rs`）、JSON 存档。
+  设计骨架见 `E:\desktop\beadpix_redesign_plan.md`（cozy 外壳 + 育种脊椎），已全部实现：
   有限地块+堆肥扩张、遗传预览+钉目标、离线事件日记、vitality 软照料、
-  委托脊椎（`quest.rs`）、PlantTraits 五条轴（`traits.rs`）
+  委托脊椎（`quest.rs`）、PlantTraits 五条轴（`traits.rs`）、移植布景
+- 游戏逻辑有 14 项测试（`garden.rs` 底部 mod tests），改经济/照料/离线规则后跑
+  `cargo test -p garden --target-dir <scratchpad>/build`。其中两项守护 cozy 契约：
+  植物永不死亡、每天来一次的玩家看不到蔫——**这两条测试不许改成通过为止**
 - `crates/face`：数字人脸，60fps，参数化表情，`R` 键切换半块/混合渲染
 
 ## 关键约定
@@ -36,12 +39,23 @@
 - **植物永不死亡**，vitality 地板 0.15。任何"我离开导致花没了"都是失败
 - 遗传预览（`predict_child`）与真实杂交（`Genes::cross`）必须保持一致
 
+## 加新品种的标准流程（系统六纪律，照做）
+
+以天时科（月见花/日晷花）为范例，改这五处：
+1. `traits.rs` 的 `traits_of`：**先在这里回答它碰哪条轴**，碰不到就别加
+2. `genetics.rs`：`VARIETIES` 计数、`variety_name`、`family`、突变表、`wild` 池
+3. `render.rs`：`draw_plant` 分发 + 一个 `draw_xxx` 函数（需要昼夜就用 `dark` 参数）
+4. `main.rs`：`TOTAL_SPECIES`（=8×品种数）、`Family` 匹配分支、截图配置加一行
+5. 光源规则：`draw` 里 `intrinsic` 与常亮分支（自发光品种）
+
 ## 路线图
 
-已完成阶段 0-4 + 系统六骨架（见 git log）。后续：
-- 布景系统（移动/摆放植株 + 装饰格）——方案里的"真·终局"，吃渲染优势
-- 每周轮换稀有种池；委托指向"碰轴"表型的比例再提高
-- 新品种按五条轴设计（月见花=NightOnly、雷种=OnRain、昙花=Ephemeral、
-  古树=Ancient 与堆肥经济形成反张力）
+方案阶段 0-4 与系统六已全部落地（见 git log）。后续候选：
+- **轴5 时间尺度尚未实现**：昙花（Ephemeral，开一夜就谢，得赶上）、
+  古树（Ancient，越老越壮观，奖励你别堆肥它——与扩张经济形成反张力，
+  方案特别看重这条）。需要给 Plant 加 age/planted_at
+- 轴1 的 OnRain/MeteorDrop 存在条件（雷种、陨种）——引擎已有事件，接上即可
+- 布景深化：装饰格、自由摆放坐标（当前只有地块间移植）
+- 图鉴按 常见/角色/传说 分层展示（现在只有统计，网格仍是扁平的）
 - 访客/明信片分享——用户说过"不着急"
 - face 项目：摄像头驱动是远期目标
