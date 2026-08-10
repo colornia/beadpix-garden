@@ -375,7 +375,8 @@ impl Garden {
                     .filter(|(_, p)| p.is_some())
                     .map(|(i, _)| i)
                     .collect();
-                if let Some(&i) = planted.get(rng.gen_range(0..planted.len().max(1)).min(planted.len().saturating_sub(1))) {
+                if !planted.is_empty() {
+                    let i = planted[rng.gen_range(0..planted.len())];
                     if let Some(p) = &mut self.plots[i] {
                         let shift: f32 = rng.gen_range(20.0..40.0) * if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
                         p.genes.hue = (p.genes.hue + shift).rem_euclid(360.0);
@@ -510,4 +511,185 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::genetics::Genes;
+
+    fn bloom(variety: u8) -> Plant {
+        Plant {
+            genes: Genes {
+                hue: 200.0,
+                saturation: 0.8,
+                petal_shape: variety,
+                height: 14,
+                growth_rate: 1.0,
+                glow: false,
+            },
+            progress: 1.0,
+            vitality: 1.0,
+            last_care: 0,
+        }
+    }
+
+    #[test]
+    fn expand_cost_rises_and_caps_at_max() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        assert_eq!(g.plots.len(), INITIAL_PLOTS);
+        let first = g.expand_cost().unwrap();
+        g.compost = 10_000;
+        assert!(g.expand());
+        // 成本随地块数递增
+        assert!(g.expand_cost().unwrap() > first);
+        while g.plots.len() < MAX_PLOTS {
+            assert!(g.expand(), "should expand up to the cap");
+        }
+        assert_eq!(g.expand_cost(), None, "no cost past the cap");
+        assert!(!g.expand(), "cannot expand past the cap");
+    }
+
+    #[test]
+    fn expand_refused_without_enough_compost() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.compost = 0;
+        assert!(!g.expand());
+        assert_eq!(g.plots.len(), INITIAL_PLOTS);
+    }
+
+    #[test]
+    fn composting_requires_bloom_and_yields_compost() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        // 未开花不能堆肥
+        let mut young = bloom(0);
+        young.progress = 0.3;
+        g.plots[0] = Some(young);
+        assert_eq!(g.compost_plant(0, &mut rng), None);
+        assert!(g.plots[0].is_some(), "failed compost must not remove plant");
+
+        g.plots[0] = Some(bloom(0));
+        let got = g.compost_plant(0, &mut rng).expect("bloom composts");
+        assert!(got >= 1);
+        assert_eq!(g.compost, got);
+        assert!(g.plots[0].is_none());
+    }
+
+    #[test]
+    fn rare_families_compost_for_more_than_common() {
+        let mut rng = rand::thread_rng();
+        // 眼球花(6)属异界科，产出 6-10；圆瓣(0)属花卉科，产出 1-3
+        let rare = Garden::compost_value(&bloom(6), &mut rng);
+        let common = Garden::compost_value(&bloom(0), &mut rng);
+        assert!(rare > common, "rare {rare} should beat common {common}");
+    }
+
+    #[test]
+    fn low_vitality_reduces_compost_yield() {
+        let mut rng = rand::thread_rng();
+        let mut wilted = bloom(6);
+        wilted.vitality = 0.15;
+        // 同科系下，蔫的产出不会超过健康的
+        let healthy_max = 10; // 异界科上限
+        let got = Garden::compost_value(&wilted, &mut rng);
+        assert!(got <= healthy_max / 2 + 2, "wilted yield {got} too high");
+        assert!(got >= 1, "yield never drops to zero");
+    }
+
+    #[test]
+    fn watering_restores_and_never_exceeds_one() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        let mut p = bloom(0);
+        p.vitality = 0.2;
+        g.plots[0] = Some(p);
+        let v = g.water(0).expect("thirsty plant accepts water");
+        assert!((v - 0.5).abs() < 1e-5, "0.2 + 0.3 = 0.5, got {v}");
+        g.water(0);
+        g.water(0);
+        let v = g.plots[0].as_ref().unwrap().vitality;
+        assert!(v <= 1.0, "vitality caps at 1.0, got {v}");
+        // 满活力时拒绝浇水（让 UI 可以回退到全园浇水）
+        assert_eq!(g.water(0), None);
+    }
+
+    #[test]
+    fn cross_breed_needs_two_adjacent_blooms() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.plots[0] = Some(bloom(0));
+        assert!(g.cross_breed(0, &mut rng).is_none(), "needs a partner");
+
+        g.plots[1] = Some(bloom(1));
+        let seeds_before = g.seeds.len();
+        assert!(g.cross_breed(0, &mut rng).is_some());
+        assert_eq!(g.seeds.len(), seeds_before + 1, "child seed is stored");
+        assert_eq!(g.breeding_log.len(), 1, "cross is logged");
+        // 双亲都还在（杂交不消耗植株）
+        assert!(g.plots[0].is_some() && g.plots[1].is_some());
+    }
+
+    #[test]
+    fn cross_breed_at_last_plot_does_not_panic() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        let last = g.plots.len() - 1;
+        g.plots[last] = Some(bloom(0));
+        assert!(g.cross_breed(last, &mut rng).is_none());
+    }
+
+    #[test]
+    fn offline_settlement_is_deterministic_for_same_save() {
+        let mut rng = rand::thread_rng();
+        let mut a = Garden::new(&mut rng);
+        a.plots[0] = Some(bloom(0));
+        a.plots[1] = Some(bloom(1));
+        a.world_seed = 4242;
+        a.last_tick = now().saturating_sub(30 * 3600);
+        let mut b = Garden {
+            plots: a.plots.clone(),
+            seeds: a.seeds.clone(),
+            last_tick: a.last_tick,
+            biome: a.biome,
+            world_seed: a.world_seed,
+            discovered: a.discovered.clone(),
+            compost: a.compost,
+            breeding_log: a.breeding_log.clone(),
+            pinned: None,
+            quests: a.quests.clone(),
+            quest_week: a.quest_week,
+            quests_done: a.quests_done,
+        };
+        let (_, ja) = a.settle_offline();
+        let (_, jb) = b.settle_offline();
+        assert_eq!(ja, jb, "same save must replay identically (no reroll farming)");
+    }
+
+    #[test]
+    fn vitality_never_hits_zero_however_long_you_are_away() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.plots[0] = Some(bloom(0));
+        // 离开一年
+        g.last_tick = now().saturating_sub(365 * 86_400);
+        g.settle_offline();
+        let v = g.plots[0].as_ref().unwrap().vitality;
+        assert!(v >= 0.15, "vitality floor is 0.15, got {v}");
+        assert!(g.plots[0].is_some(), "plants never die");
+    }
+
+    #[test]
+    fn a_daily_player_never_sees_wilting() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.plots[0] = Some(bloom(0));
+        g.last_tick = now().saturating_sub(24 * 3600);
+        g.settle_offline();
+        let v = g.plots[0].as_ref().unwrap().vitality;
+        // 24 小时后仍应明显高于"蔫"的提示阈值 0.6
+        assert!(v > 0.6, "24h away should not wilt; vitality was {v}");
+    }
 }
