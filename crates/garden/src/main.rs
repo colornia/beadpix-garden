@@ -75,7 +75,8 @@ fn main() -> std::io::Result<()> {
 
     let mut selected: usize = 0;
     let mut time = 0.0f32;
-    let mut gallery = false;
+    // 图鉴：None=关闭，Some((列,行)) 是查看光标
+    let mut gallery: Option<(usize, usize)> = None;
     // HUD 第一行的显示模式：0=状态 1=委托列表
     let mut hud_mode = 0u8;
     // 移植模式：Some(源地块)，再选一块地即完成搬迁/互换
@@ -112,14 +113,19 @@ fn main() -> std::io::Result<()> {
     loop {
         // --- 输入 ---
         let key = TerminalSession::poll_key(Duration::from_millis(1))?;
-        // 图鉴页打开时：B/Esc 关闭，其他键忽略
-        if gallery {
-            if matches!(
-                key,
-                Some(KeyCode::Esc) | Some(KeyCode::Char('b')) | Some(KeyCode::Char('B'))
-            ) {
-                gallery = false;
-                renderer.invalidate();
+        // 图鉴页打开时：方向键移动查看光标，B/Esc 关闭
+        if let Some((gc, gr)) = gallery {
+            let ncols = genetics::VARIETIES as usize;
+            match key {
+                Some(KeyCode::Esc) | Some(KeyCode::Char('b')) | Some(KeyCode::Char('B')) => {
+                    gallery = None;
+                    renderer.invalidate();
+                }
+                Some(KeyCode::Left) => gallery = Some(((gc + ncols - 1) % ncols, gr)),
+                Some(KeyCode::Right) => gallery = Some(((gc + 1) % ncols, gr)),
+                Some(KeyCode::Up) => gallery = Some((gc, (gr + 7) % 8)),
+                Some(KeyCode::Down) => gallery = Some((gc, (gr + 1) % 8)),
+                _ => {}
             }
         } else if let Some(slot) = decor_cursor {
             // 布景模式：把花园当画布摆东西（系统五终局）
@@ -150,7 +156,7 @@ fn main() -> std::io::Result<()> {
             match key {
             Some(KeyCode::Esc) => break,
             Some(KeyCode::Char('b')) | Some(KeyCode::Char('B')) => {
-                gallery = true;
+                gallery = Some((0, 0));
                 renderer.invalidate();
             }
             Some(KeyCode::Char('d')) | Some(KeyCode::Char('D')) => {
@@ -350,8 +356,8 @@ fn main() -> std::io::Result<()> {
         }
 
         // --- 渲染 ---
-        if gallery {
-            scene.draw_gallery(&mut canvas, &garden, time);
+        if let Some(cur) = gallery {
+            scene.draw_gallery(&mut canvas, &garden, time, cur);
         } else {
             scene.draw(
                 &mut canvas,
@@ -365,8 +371,8 @@ fn main() -> std::io::Result<()> {
             );
         }
         renderer.present(&canvas, session.out(), 1, 1)?;
-        if gallery {
-            draw_gallery_hud(&mut session, canvas_h / 2 + 1, cols, &garden)?;
+        if let Some(cur) = gallery {
+            draw_gallery_hud(&mut session, canvas_h / 2 + 1, cols, &garden, cur)?;
         } else {
             draw_hud(
                 &mut session,
@@ -480,7 +486,7 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
     ] {
         g.discover(sp);
     }
-    scene.draw_gallery(&mut canvas, &g, 1.5);
+    scene.draw_gallery(&mut canvas, &g, 1.5, (12, 3)); // 光标停在传说层看效果
     bmp::write_bmp(&Path::new(dir).join("garden_gallery.bmp"), &canvas, 6)?;
     println!("wrote garden_gallery.bmp");
     Ok(())
@@ -543,6 +549,7 @@ fn draw_gallery_hud(
     hud_row: u32,
     cols: u16,
     garden: &Garden,
+    cursor: (usize, usize),
 ) -> std::io::Result<()> {
     // 按稀有度分层统计——传说才显得像传说
     let (mut backdrop, mut character, mut legend) = (0usize, 0usize, 0usize);
@@ -569,8 +576,17 @@ fn draw_gallery_hud(
             traits::Tier::Legend => n_l += 8,
         }
     }
+    // 光标所指的那一格：把这个品种的规则讲清楚
+    const HUES: [f32; 8] = [0.0, 30.0, 57.0, 115.0, 180.0, 225.0, 270.0, 315.0];
+    let order = render::Scene::gallery_order();
+    let variety = order[cursor.0.min(order.len() - 1)];
+    let hue = HUES[cursor.1.min(7)];
+    let species = format!("{}{}", genetics::hue_name(hue), genetics::variety_name(variety));
+    let found = garden.discovered.iter().any(|s| s == &species);
+    let t = traits::traits_of(variety);
+
     let line1 = format!(
-        " ❀ 图鉴 {}/{} | ▬常见 {}/{} · ▬角色 {}/{} · ▬传说 {}/{} | 顶部色带分层，左→右 由常见到传说",
+        " ❀图鉴 {}/{} | ▬常见{}/{} ▬角色{}/{} ▬传说{}/{} | ▶{} [{}科·{}] {}",
         garden.discovered.len(),
         TOTAL_SPECIES,
         backdrop,
@@ -579,10 +595,25 @@ fn draw_gallery_hud(
         n_c,
         legend,
         n_l,
+        species,
+        genetics::family(variety).name(),
+        t.tier().name(),
+        if found { "✓已收录" } else { "未培育" },
     );
-    let line2 = String::from(
-        " 剪影=未培育 | 异界/炼金/天时靠杂交突变，水生来自深海，陨星花只由流星带来 | [B/Esc]返回",
-    );
+    let reasons = t.reasons();
+    let line2 = if reasons.is_empty() {
+        format!(
+            " {} 是底纹层的平凡花——正是它衬出稀有 | 获取：{} | [←→↑↓]查看 [B/Esc]返回",
+            genetics::variety_name(variety),
+            t.how_to_get(),
+        )
+    } else {
+        format!(
+            " {} | 获取：{} | [←→↑↓]查看 [B/Esc]返回",
+            reasons.join("；"),
+            t.how_to_get(),
+        )
+    };
     let width = cols as usize;
     let out = session.out();
     write!(

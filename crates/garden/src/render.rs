@@ -495,7 +495,32 @@ impl Scene {
     /// 图鉴页：12 品种（列）x 8 色系（行）的收集网格。
     /// 已收集的用真实渲染器画出活的迷你植株（眼球在眨、法阵在转），
     /// 未收集的是暗色剪影——"还差几个"一目了然。
-    pub fn draw_gallery(&mut self, canvas: &mut Canvas, garden: &Garden, time: f32) {
+    /// 图鉴里按显示顺序排列的品种（常见 → 角色 → 传说），
+    /// 主程序用它把光标列号翻译成品种号。
+    pub fn gallery_order() -> Vec<u8> {
+        use crate::genetics::VARIETIES;
+        use crate::traits::{traits_of, Tier};
+        let mut cols: Vec<(u8, Tier)> = (0..VARIETIES).map(|v| (v, traits_of(v).tier())).collect();
+        cols.sort_by_key(|(v, t)| {
+            (
+                match t {
+                    Tier::Backdrop => 0,
+                    Tier::Character => 1,
+                    Tier::Legend => 2,
+                },
+                *v,
+            )
+        });
+        cols.into_iter().map(|(v, _)| v).collect()
+    }
+
+    pub fn draw_gallery(
+        &mut self,
+        canvas: &mut Canvas,
+        garden: &Garden,
+        time: f32,
+        cursor: (usize, usize),
+    ) {
         use crate::genetics::{hue_name, variety_name, VARIETIES};
         use crate::traits::{traits_of, Tier};
 
@@ -614,6 +639,21 @@ impl Scene {
                                 canvas.set(x0 + tx, y0 + ty, c);
                             }
                         }
+                    }
+                }
+
+                // 光标：给选中的那格描一个闪动的边框
+                if (col, row) == cursor {
+                    let blink = (((time * 3.2).sin() * 0.5 + 0.5) * 130.0) as u8 + 110;
+                    let edge = Rgb::new(255, 244, 214);
+                    let y1 = y0 + cell_h as i32 - 1;
+                    for x in x0..x1 {
+                        canvas.blend(x, y0, edge, blink);
+                        canvas.blend(x, y1, edge, blink);
+                    }
+                    for y in y0..=y1 {
+                        canvas.blend(x0, y, edge, blink);
+                        canvas.blend(x1 - 1, y, edge, blink);
                     }
                 }
             }

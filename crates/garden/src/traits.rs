@@ -138,6 +138,53 @@ impl Tier {
     }
 }
 
+impl PlantTraits {
+    /// 它碰的每条轴各是什么——图鉴里讲给玩家听的"值得拥有的理由"。
+    /// 一株没有理由的花只是调色板；有理由的才是角色。
+    pub fn reasons(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if let Some(c) = self.spawn_cond {
+            out.push(match c {
+                SpawnCond::OnRain => "种下后要等一场雨才发芽",
+                SpawnCond::NightOnly => "只在入夜后绽放",
+                SpawnCond::MeteorDrop => "只有流星落进花园才会留下它的种子",
+                SpawnCond::BiomeLocked => "只长在特定群系",
+            });
+        }
+        for b in &self.behavior {
+            out.push(match b {
+                Behavior::Blink => "会眨眼，瞳孔四处张望",
+                Behavior::Writhe => "触须不停蠕动",
+                Behavior::Heliotropic => "花盘追着日月转",
+                Behavior::CloseOnCursor => "有东西靠近就合拢",
+                Behavior::ClockOpen => "按时辰开合",
+                Behavior::Spark => "迸发电弧／星芒闪烁",
+            });
+        }
+        if let Some(n) = self.neighbor {
+            out.push(match n {
+                NeighborEffect::Wither => "会让相邻两株枯萎得更快",
+                NeighborEffect::Nourish => "夜里给相邻两株补活力",
+                NeighborEffect::ShadeCast => "投下荫影，喜阴的邻居更茂盛",
+            });
+        }
+        if self.lifespan == Lifespan::Ephemeral {
+            out.push("开一夜，天明即谢——但会留下 2-3 颗种子");
+        }
+        out
+    }
+
+    /// 怎么得到它。
+    pub fn how_to_get(&self) -> &'static str {
+        match (self.spawn_cond, self.genetic) {
+            (Some(SpawnCond::MeteorDrop), _) => "离线时流星砸中花园（突变表里没有它）",
+            (Some(SpawnCond::BiomeLocked), _) => "深海群系的野生种子池",
+            (_, Some(GeneticTag::MutationOnly)) => "杂交突变觉醒（同科配种可提高血统亲和）",
+            _ => "野生种子池／杂交",
+        }
+    }
+}
+
 /// 现有 12 品种的性格表——已实现的行为在此登记，
 /// 新品种加入时先在这里回答"它碰哪条轴"。
 pub fn traits_of(variety: u8) -> PlantTraits {
