@@ -22,7 +22,7 @@ const FPS: u64 = 30;
 /// 画面下方保留的文字行数（HUD）
 const HUD_ROWS: u16 = 2;
 /// 图鉴总品种数：8 色系 x 14 品种（六大科系）
-const TOTAL_SPECIES: usize = 112;
+const TOTAL_SPECIES: usize = 136;
 
 fn save_path() -> PathBuf {
     std::env::current_dir()
@@ -295,6 +295,11 @@ fn main() -> std::io::Result<()> {
             message = format!("古株结籽了：{}。", gifts.join("、"));
         }
 
+        // --- 昙花：天亮即谢（留种）。轴5 时间尺度的唯一"失去" ---
+        for note in garden.settle_ephemeral(&weather, &mut rng) {
+            message = note;
+        }
+
         // --- 委托：轮换 + 达成检查（脊椎）---
         for done in garden.update_quests(&mut rng) {
             message = done;
@@ -357,7 +362,7 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
 
     std::fs::create_dir_all(dir)?;
     // (群系, 标签, 时刻, 彩虹秒数, 八个地块的品种)
-    let shots: [(Biome, &str, f32, f32, [u8; 8]); 10] = [
+    let shots: [(Biome, &str, f32, f32, [u8; 8]); 12] = [
         (Biome::Meadow, "meadow_noon", 0.28, 0.0, [0, 4, 1, 3, 2, 4, 3, 0]),
         (Biome::Meadow, "meadow_rainbow", 0.3, 25.0, [0, 4, 1, 3, 2, 4, 3, 0]),
         (Biome::Meadow, "meadow_night", 0.72, 0.0, [0, 4, 1, 3, 2, 4, 3, 0]),
@@ -371,6 +376,9 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
         // 天时科：同样两株，白天闭合 / 夜里绽放
         (Biome::Meadow, "celestial_noon", 0.3, 0.0, [12, 13, 12, 13, 12, 13, 12, 13]),
         (Biome::Meadow, "celestial_night", 0.72, 0.0, [12, 13, 12, 13, 12, 13, 12, 13]),
+        // 雷纹花 / 陨星花 / 昙花：夜里最出效果（昙花只有夜里开）
+        (Biome::Meadow, "storm_meteor_night", 0.72, 0.0, [14, 15, 16, 14, 15, 16, 14, 15]),
+        (Biome::Meadow, "storm_meteor_noon", 0.3, 0.0, [14, 15, 16, 14, 15, 16, 14, 15]),
     ];
     for (biome, tag, clock, rainbow, shapes) in shots {
         let stages = [1.0, 0.3, 0.6, 1.0, 1.0, 1.0, 1.0, 0.9];
@@ -391,6 +399,7 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
                     last_care: 0,
                     planted_at: 0,
                     last_gift: 0,
+                    had_bloom_night: false,
                 })
             })
             .collect();
@@ -499,21 +508,29 @@ fn draw_gallery_hud(
             traits::Tier::Legend => legend += found,
         }
     }
+    // 每层的品种数 × 8 色系 = 该层总格数
+    let (mut n_b, mut n_c, mut n_l) = (0usize, 0usize, 0usize);
+    for v in 0..genetics::VARIETIES {
+        match traits::traits_of(v).tier() {
+            traits::Tier::Backdrop => n_b += 8,
+            traits::Tier::Character => n_c += 8,
+            traits::Tier::Legend => n_l += 8,
+        }
+    }
     let line1 = format!(
-        " ❀ 图鉴 {}/{} | 常见 {}/48 · 角色 {}/16 · 传说 {}/8 · 群系限定 {}/16 | 列=品种 行=8色系",
+        " ❀ 图鉴 {}/{} | ▬常见 {}/{} · ▬角色 {}/{} · ▬传说 {}/{} | 顶部色带分层，左→右 由常见到传说",
         garden.discovered.len(),
         TOTAL_SPECIES,
         backdrop,
+        n_b,
         character,
+        n_c,
         legend,
-        garden
-            .discovered
-            .iter()
-            .filter(|s| s.contains("海葵") || s.contains("珊瑚"))
-            .count(),
+        n_l,
     );
-    let line2 =
-        String::from(" 剪影 = 未培育品种 | 异界/炼金科靠杂交突变，水生科来自深海群系 | [B/Esc] 返回");
+    let line2 = String::from(
+        " 剪影=未培育 | 异界/炼金/天时靠杂交突变，水生来自深海，陨星花只由流星带来 | [B/Esc]返回",
+    );
     let width = cols as usize;
     let out = session.out();
     write!(
@@ -612,8 +629,21 @@ fn draw_hud(
                 } else {
                     String::new()
                 };
+                // 轴1/轴5 的两条"你得赶上那一刻"必须提前讲明白——
+                // 昙花是全局唯一会谢的品种，玩家有权预知并安排好在场
+                let timing = if p.is_ephemeral() {
+                    match p.stage() {
+                        Stage::Bloom if p.had_bloom_night => " ❀今夜之后天明即谢(留2-3种子)",
+                        Stage::Bloom => " ❀绽放中·天明即谢(留2-3种子)",
+                        _ => " ❀入夜才开·开一夜即谢(留种)",
+                    }
+                } else if p.needs_rain_to_sprout() && p.stage() == Stage::Seed {
+                    " ⛈等一场雨才发芽"
+                } else {
+                    ""
+                };
                 format!(
-                    "{}号地: [{}{}] {} {} {:.0}%{}{}{}{}",
+                    "{}号地: [{}{}] {} {} {:.0}%{}{}{}{}{}",
                     selected + 1,
                     fam,
                     tier,
@@ -621,6 +651,7 @@ fn draw_hud(
                     stage,
                     p.progress * 100.0,
                     age,
+                    timing,
                     rule,
                     vit,
                     pin_delta,

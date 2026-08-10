@@ -34,6 +34,8 @@ pub enum Behavior {
     CloseOnCursor,
     /// 按整点开合（林奈"花钟"）
     ClockOpen,
+    /// 电弧迸发／星芒闪烁（雷纹花、陨星花）
+    Spark,
 }
 
 /// 轴 3 · 邻居关系：对旁边的花做什么。
@@ -183,10 +185,36 @@ pub fn traits_of(variety: u8) -> PlantTraits {
             ..Default::default()
         },
         // 13 日晷花：向日 + 按时开合（轴2）+ 夜间滋养邻株（轴3）+ 突变觉醒（轴4）
-        _ => PlantTraits {
+        13 => PlantTraits {
             behavior: vec![Behavior::Heliotropic, Behavior::ClockOpen],
             neighbor: Some(NeighborEffect::Nourish),
             genetic: Some(GeneticTag::MutationOnly),
+            ..Default::default()
+        },
+        // 14 雷纹花：**只在雨中发芽**（轴1）+ 雨天电弧迸发（轴2）+ 突变觉醒（轴4）→ 传说级。
+        // 种下后若不下雨，它就一直是颗种子等着——你得等一场雨。
+        14 => PlantTraits {
+            spawn_cond: Some(SpawnCond::OnRain),
+            behavior: vec![Behavior::Spark],
+            genetic: Some(GeneticTag::MutationOnly),
+            ..Default::default()
+        },
+
+        // 15 陨星花：**只能由流星带来**（轴1）+ 星芒闪烁（轴2）+ 夜间滋养邻株（轴3）→ 传说级。
+        // 突变表里没有它——只有流星砸中花园才会留下这颗种子
+        15 => PlantTraits {
+            spawn_cond: Some(SpawnCond::MeteorDrop),
+            behavior: vec![Behavior::Spark],
+            neighbor: Some(NeighborEffect::Nourish),
+            ..Default::default()
+        },
+        // 16 昙花：只在夜里绽放（轴1）+ 开一夜天明即谢（轴5）+ 突变觉醒（轴4）→ 传说级。
+        // 全局唯一会"谢"的品种。谢时留下 2-3 颗种子（净赚），
+        // 失去的只是"那一刻的景象"——所以 HUD 必须提前预告，见 main.rs
+        _ => PlantTraits {
+            spawn_cond: Some(SpawnCond::NightOnly),
+            genetic: Some(GeneticTag::MutationOnly),
+            lifespan: Lifespan::Ephemeral,
             ..Default::default()
         },
     }

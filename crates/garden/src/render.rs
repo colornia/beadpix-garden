@@ -201,6 +201,8 @@ impl Scene {
         // --- 植株（按锚点顺序绘制：后排先画，前排自然遮挡）---
         // 天时科（月见花/日晷花）的开合绑定这个值
         let dark0 = weather.darkness();
+        // 雷纹花的发芽与电弧绑定这个值
+        let raining0 = weather.kind == Kind::Rain;
         let pts = anchors(biome, w, h, seed, garden.plots.len());
         // (x, y, 主色, 发光基因, 品种, vitality)
         let mut blooms: Vec<(i32, i32, Rgb, bool, u8, f32)> = Vec::new();
@@ -242,7 +244,9 @@ impl Scene {
                 let stiff = if plant.is_venerable() { 0.55 } else { 1.0 };
                 let wind =
                     weather.wind() * gust(time, ax) * (0.5 + plant.vitality * 0.5) * stiff + droop;
-                if let Some(b) = self.draw_plant(canvas, plant, ax, ay, wind, time, dark0) {
+                if let Some(b) =
+                    self.draw_plant(canvas, plant, ax, ay, wind, time, dark0, raining0)
+                {
                     blooms.push((b.0, b.1, b.2, b.3, b.4, plant.vitality));
                 }
                 // 古株的苔痕：茎基一圈青苔与虬结，越老越明显
@@ -471,6 +475,7 @@ impl Scene {
     /// 未收集的是暗色剪影——"还差几个"一目了然。
     pub fn draw_gallery(&mut self, canvas: &mut Canvas, garden: &Garden, time: f32) {
         use crate::genetics::{hue_name, variety_name, VARIETIES};
+        use crate::traits::{traits_of, Tier};
 
         let w = canvas.width();
         let h = canvas.height();
@@ -486,16 +491,53 @@ impl Scene {
         }
 
         const HUES: [f32; 8] = [0.0, 30.0, 57.0, 115.0, 180.0, 225.0, 270.0, 315.0];
-        let cell_w = (w / VARIETIES as u32).max(4);
-        let cell_h = (h / 8).max(4);
+        // 按稀有度分层排列列序：常见 → 角色 → 传说。
+        // 扁平网格里传说花和墙纸花并排，传说就不像传说了
+        let mut cols: Vec<(u8, Tier)> = (0..VARIETIES)
+            .map(|v| (v, traits_of(v).tier()))
+            .collect();
+        cols.sort_by_key(|(v, t)| {
+            (
+                match t {
+                    Tier::Backdrop => 0,
+                    Tier::Character => 1,
+                    Tier::Legend => 2,
+                },
+                *v,
+            )
+        });
+
+        let n = cols.len() as u32;
+        let band_h = 3i32; // 顶部分层色带
+        let grid_h = h as i32 - band_h;
+        let cell_w = (w / n).max(4);
+        let cell_h = (grid_h as u32 / 8).max(4);
         // 哨兵色画布：每格先在小画布上渲染，再裁剪拷贝——不会串格
         const MAGIC: Rgb = Rgb::new(255, 0, 255);
         let mut tmp = Canvas::new(cell_w, cell_h);
 
-        for variety in 0..VARIETIES {
+        for (col, &(variety, tier)) in cols.iter().enumerate() {
+            let x0 = (col as u32 * w / n) as i32;
+            let x1 = ((col as u32 + 1) * w / n) as i32;
+            let tier_color = match tier {
+                Tier::Backdrop => Rgb::new(96, 104, 120),
+                Tier::Character => Rgb::new(104, 162, 196),
+                Tier::Legend => Rgb::new(214, 168, 74),
+            };
+            // 分层色带：同层连成一条，层与层之间留一格缺口作分隔
+            let prev_tier = col.checked_sub(1).map(|p| cols[p].1);
+            let new_group = prev_tier != Some(tier);
+            for x in x0..x1 {
+                if new_group && x < x0 + 1 {
+                    continue; // 组首留缺口
+                }
+                for y in 0..band_h - 1 {
+                    canvas.set(x, y, tier_color);
+                }
+            }
+
             for (row, &hue) in HUES.iter().enumerate() {
-                let x0 = (variety as u32 * w / VARIETIES as u32) as i32;
-                let y0 = (row as u32 * h / 8) as i32;
+                let y0 = band_h + (row as u32 * grid_h as u32 / 8) as i32;
                 let species = format!("{}{}", hue_name(hue), variety_name(variety));
                 let found = garden.discovered.iter().any(|s| s == &species);
 
@@ -513,9 +555,11 @@ impl Scene {
                     last_care: 0,
                     planted_at: 0,
                     last_gift: 0,
+                    had_bloom_night: false,
                 };
                 tmp.clear(MAGIC);
-                // 图鉴里天时科按"绽放的那一刻"展示（dark=1 → 月见花开着）
+                // 图鉴里按"最好看的那一刻"展示：dark=1 让月见花/昙花开着，
+                // raining=true 让雷纹花迸着电弧
                 self.draw_plant(
                     &mut tmp,
                     &mini,
@@ -524,12 +568,12 @@ impl Scene {
                     0.0,
                     time,
                     1.0,
+                    true,
                 );
 
                 // 已收集：脚下微光基座（先画，植株盖在上面）
                 if found {
-                    let pulse = ((time * 1.3 + (variety as f32 + row as f32 * 2.0)).sin() * 0.5
-                        + 0.5)
+                    let pulse = ((time * 1.3 + (col as f32 + row as f32 * 2.0)).sin() * 0.5 + 0.5)
                         * 22.0;
                     soft_circle(
                         canvas,
@@ -1073,11 +1117,17 @@ impl Scene {
         wind: f32,
         time: f32,
         dark: f32,
+        raining: bool,
     ) -> Option<(i32, i32, Rgb, bool, u8)> {
         use crate::genetics::VARIETIES;
         let genes = &plant.genes;
         let stage = plant.stage();
+        let variety = genes.petal_shape % VARIETIES;
         if stage == Stage::Seed {
+            // 雷种在土里等雨，有自己的种壳画法（其余品种共用土包）
+            if variety == 14 {
+                return self.draw_stormflower(canvas, plant, px, ground_y, wind, time, 0.0, raining);
+            }
             canvas.set(px, ground_y, Rgb::new(70, 50, 30));
             canvas.set(px - 1, ground_y, Rgb::new(70, 50, 30));
             canvas.set(px + 1, ground_y, Rgb::new(70, 50, 30));
@@ -1085,9 +1135,12 @@ impl Scene {
         }
         // 生长比例 0..1（发芽到成熟）
         let gp = ((plant.progress - 0.15) / 0.85).clamp(0.0, 1.0);
-        match genes.petal_shape % VARIETIES {
+        match variety {
             12 => self.draw_moonflower(canvas, plant, px, ground_y, wind, time, gp, dark),
             13 => self.draw_sundial(canvas, plant, px, ground_y, wind, time, gp, dark),
+            14 => self.draw_stormflower(canvas, plant, px, ground_y, wind, time, gp, raining),
+            15 => self.draw_meteorflower(canvas, plant, px, ground_y, wind, time, gp),
+            16 => self.draw_ephemeral(canvas, plant, px, ground_y, wind, time, gp, dark),
             4 => self.draw_grass(canvas, plant, px, ground_y, wind, gp),
             5 => self.draw_fern(canvas, plant, px, ground_y, wind, gp),
             6 => self.draw_eyeflower(canvas, plant, px, ground_y, wind, time, gp),
@@ -1682,6 +1735,235 @@ impl Scene {
             Rgb::new(250, 234, 168),
         );
         Some((cx, ty, petal, genes.glow, 13))
+    }
+
+    /// 雷纹花（14）：种子期在土里静静等雨（画成一颗带电纹的种壳），
+    /// 一旦下雨就抽出锯齿状枝干，花瓣是分叉的闪电纹，雨中不断迸发电弧。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_stormflower(
+        &self,
+        canvas: &mut Canvas,
+        plant: &Plant,
+        px: i32,
+        ground_y: i32,
+        wind: f32,
+        time: f32,
+        gp: f32,
+        raining: bool,
+    ) -> Option<(i32, i32, Rgb, bool, u8)> {
+        let genes = &plant.genes;
+        let stage = plant.stage();
+        let arc = Rgb::new(226, 238, 255);
+        let bolt = Rgb::from_hsv(genes.hue, genes.saturation * 0.5, 1.0);
+        let stalk = Rgb::new(78, 84, 104);
+
+        if stage == Stage::Seed {
+            // 等雨的种壳：暗色小球，表面电纹偶尔亮一下
+            canvas.set(px, ground_y, Rgb::new(62, 66, 84));
+            canvas.set(px - 1, ground_y, Rgb::new(50, 54, 70));
+
+            canvas.set(px + 1, ground_y, Rgb::new(50, 54, 70));
+            let pulse = ((time * 2.2 + px as f32).sin() * 0.5 + 0.5) * 190.0;
+            canvas.blend(px, ground_y - 1, arc, pulse as u8);
+            return None;
+        }
+
+        let full_h = genes.height as f32;
+        let cur_h = (full_h * gp) as i32;
+        // 锯齿状茎：每隔几格折一次，像一道定住的闪电
+        let mut zx = px;
+        for i in 0..cur_h {
+            if i % 3 == 0 {
+                zx += if (i / 3) % 2 == 0 { 1 } else { -1 };
+            }
+            let o = wind * 1.2 * (i as f32 / full_h).powf(1.6);
+            canvas.set(zx + o.round() as i32, ground_y - i, stalk);
+        }
+        let tx = zx + (wind * 1.0).round() as i32;
+        let ty = ground_y - cur_h;
+
+        if stage != Stage::Bloom {
+            canvas.set(tx, ty, bolt.tint(0.6, 0.6, 0.7));
+            return None;
+        }
+
+        // 花：四道分叉的闪电纹从中心射出
+        for k in 0..4 {
+            let ang = k as f32 * std::f32::consts::TAU / 4.0 + 0.4;
+            let mut x = tx as f32;
+            let mut y = ty as f32;
+            for i in 0..4 {
+                x += ang.cos() + if i % 2 == 0 { 0.6 } else { -0.6 };
+                y += ang.sin() * 0.8;
+                canvas.set(x as i32, y as i32, if i < 2 { bolt } else { arc });
+            }
+        }
+        canvas.fill_circle(tx, ty, 1, arc);
+        // 雨中迸发电弧：短促的随机火花
+        if raining {
+            let t = (time * 6.0 + px as f32).fract();
+            if t < 0.35 {
+                let sx = tx + ((time * 13.0).sin() * 4.0) as i32;
+                let sy = ty + ((time * 17.0).cos() * 3.0) as i32;
+                canvas.blend(sx, sy, arc, 235);
+                canvas.blend(sx, sy - 1, arc, 140);
+            }
+        }
+        Some((tx, ty, bolt, genes.glow, 14))
+    }
+
+    /// 陨星花（15）：流星带来的种。天生自发光，花瓣是四芒星，
+    /// 星芒长度随时间脉动闪烁，脚下落着一圈星尘。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_meteorflower(
+        &self,
+        canvas: &mut Canvas,
+        plant: &Plant,
+        px: i32,
+        ground_y: i32,
+        wind: f32,
+        time: f32,
+        gp: f32,
+    ) -> Option<(i32, i32, Rgb, bool, u8)> {
+        let genes = &plant.genes;
+        let stage = plant.stage();
+        let full_h = genes.height as f32;
+        let cur_h = (full_h * gp) as i32;
+        let core = Rgb::from_hsv(genes.hue, genes.saturation * 0.5, 1.0);
+        let halo = Rgb::from_hsv(genes.hue, genes.saturation, 0.8);
+
+        for i in 0..cur_h {
+            let o = wind * 1.3 * (i as f32 / full_h).powf(1.6);
+            canvas.set(px + o.round() as i32, ground_y - i, Rgb::new(70, 78, 96));
+        }
+        let tx = px + (wind * 1.0).round() as i32;
+        let ty = ground_y - cur_h;
+        // 星尘：脚下一圈缓慢明灭的碎屑
+        for k in 0..4i32 {
+            let a = (time * 0.5 + k as f32 * 1.6).sin();
+            canvas.blend(
+                px + (a * 3.0) as i32,
+                ground_y - (k % 2),
+                core,
+                (((a * 0.5 + 0.5) * 120.0) as u8).max(30),
+            );
+        }
+        if stage != Stage::Bloom {
+            if cur_h > 0 {
+                canvas.blend(tx, ty, halo, 200);
+            }
+            return None;
+        }
+
+        // 四芒星：纵横两轴长、对角短，长度脉动
+        let pulse = (time * 1.6 + px as f32 * 0.4).sin() * 0.5 + 0.5;
+        let long = 3 + (pulse * 2.0) as i32;
+        for d in 1..=long {
+            let t = d as f32 / long as f32;
+            let c = core.lerp(halo, t);
+            canvas.set(tx, ty - d, c);
+            canvas.set(tx, ty + d, c);
+            canvas.set(tx - d, ty, c);
+            canvas.set(tx + d, ty, c);
+        }
+        for d in 1..=1 {
+            canvas.set(tx - d, ty - d, halo);
+            canvas.set(tx + d, ty - d, halo);
+            canvas.set(tx - d, ty + d, halo);
+            canvas.set(tx + d, ty + d, halo);
+        }
+        canvas.fill_circle(tx, ty, 1, Rgb::WHITE);
+        Some((tx, ty, core, true, 15)) // 天生自发光
+    }
+
+    /// 昙花（16）：白天是低垂的纺锤花苞，入夜绽放成一朵巨大的白色喇叭花，
+    /// 层层花瓣向外舒展、丝状花蕊四射——天亮就谢（留种，见 settle_ephemeral）。
+    #[allow(clippy::too_many_arguments)]
+    fn draw_ephemeral(
+        &self,
+        canvas: &mut Canvas,
+        plant: &Plant,
+        px: i32,
+        ground_y: i32,
+        wind: f32,
+        time: f32,
+        gp: f32,
+        dark: f32,
+    ) -> Option<(i32, i32, Rgb, bool, u8)> {
+        let genes = &plant.genes;
+        let stage = plant.stage();
+        let full_h = genes.height as f32;
+        let cur_h = (full_h * gp) as i32;
+        // 绽放度：入夜后缓缓张开
+        let open = ((dark - 0.4) / 0.45).clamp(0.0, 1.0);
+        let stalk = Rgb::new(62, 106, 72);
+
+        for i in 0..cur_h {
+            let o = wind * 1.6 * (i as f32 / full_h).powf(1.6);
+            canvas.set(px + o.round() as i32, ground_y - i, stalk);
+        }
+        let tx = px + (wind * 1.3).round() as i32;
+        let ty = ground_y - cur_h;
+        // 厚实的肉质叶
+        if cur_h > 5 {
+            let ly = ground_y - cur_h / 3;
+            for d in 1..=3 {
+                canvas.set(px - d, ly + d / 3, Rgb::new(56, 116, 74));
+                canvas.set(px + d, ly - 1 + d / 3, Rgb::new(48, 100, 66));
+            }
+        }
+        if stage != Stage::Bloom {
+            return None;
+        }
+
+        let petal = Rgb::from_hsv(genes.hue, genes.saturation * 0.18, 0.99);
+        let shade = Rgb::from_hsv(genes.hue, genes.saturation * 0.4, 0.74);
+        let throat = Rgb::from_hsv(genes.hue, genes.saturation * 0.55, 0.88);
+
+        if open < 0.05 {
+            // 白天：低垂的长纺锤花苞
+            for d in 0..5i32 {
+                let w = if d == 0 || d == 4 { 0 } else { 1 };
+                for dx in -w..=w {
+                    canvas.set(tx + dx + d / 3, ty + d, shade);
+                }
+            }
+            return Some((tx, ty + 2, shade, genes.glow, 16));
+        }
+
+        // 夜里：巨大的喇叭花，两层花瓣 + 丝状花蕊
+        let len = 2.0 + open * 4.5;
+        for k in 0..10 {
+            let ang = k as f32 * std::f32::consts::TAU / 10.0 + time * 0.05;
+            for i in 1..=len as i32 {
+                let t = i as f32 / len;
+                let x = tx + (ang.cos() * i as f32 * 1.1).round() as i32;
+                let y = ty + (ang.sin() * i as f32 * 0.72).round() as i32;
+                canvas.set(x, y, if t > 0.75 { petal } else { shade.lerp(petal, t) });
+            }
+        }
+        // 内层短瓣
+        for k in 0..8 {
+            let ang = k as f32 * std::f32::consts::TAU / 8.0 + 0.35;
+            for i in 1..=(len * 0.45) as i32 {
+                canvas.set(
+                    tx + (ang.cos() * i as f32).round() as i32,
+                    ty + (ang.sin() * i as f32 * 0.7).round() as i32,
+                    throat,
+                );
+            }
+        }
+        // 花蕊：一簇细丝，尖端点着金黄
+        for k in 0..5 {
+            let ang = -1.2 + k as f32 * 0.28;
+            let l = 2.0 + open * 1.6;
+            let ex = tx + (ang.cos() * l).round() as i32;
+            let ey = ty + (ang.sin() * l).round() as i32;
+            canvas.set(ex, ey, Rgb::new(250, 240, 190));
+            canvas.set(ex, ey - 1, Rgb::new(252, 226, 120));
+        }
+        canvas.fill_circle(tx, ty, 1, Rgb::new(255, 252, 240));
+        Some((tx, ty, petal, genes.glow, 16))
     }
 
     /// 珊瑚枝（11）：分叉的枝干，末端缀着发光的珊瑚虫。

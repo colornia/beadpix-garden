@@ -69,6 +69,9 @@ pub struct Plant {
     /// 上次结出无偿种子的时间戳（古株的被动馈赠）
     #[serde(default)]
     pub last_gift: u64,
+    /// 昙花专用：已经历过一个绽放之夜。天亮即谢（留种），见 settle_ephemeral。
+    #[serde(default)]
+    pub had_bloom_night: bool,
 }
 
 /// 成为"古株"所需的存活真实秒数（约 6 小时）。
@@ -98,6 +101,21 @@ impl Plant {
             p if p < 0.85 => Stage::Bud,
             _ => Stage::Bloom,
         }
+    }
+
+    pub fn traits(&self) -> crate::traits::PlantTraits {
+        crate::traits::traits_of(self.genes.petal_shape)
+    }
+
+    /// 昙花：开一夜、天明即谢。是全局唯一会"谢"的品种，
+    /// 因此契约是——提前预告 + 谢时留种（净赚），失去的只是那一刻的景象。
+    pub fn is_ephemeral(&self) -> bool {
+        self.traits().lifespan == crate::traits::Lifespan::Ephemeral
+    }
+
+    /// 雷种：只在雨里发芽。种下后不下雨就一直是颗种子等着。
+    pub fn needs_rain_to_sprout(&self) -> bool {
+        self.traits().spawn_cond == Some(crate::traits::SpawnCond::OnRain)
     }
 }
 
@@ -308,7 +326,11 @@ impl Garden {
         let weather_mul = weather.growth_multiplier();
         let raining = weather.kind == crate::weather::Kind::Rain;
         for plant in self.plots.iter_mut().flatten() {
-            if plant.progress < 1.0 {
+            // 轴1 存在条件：雷种不下雨就不发芽，一直是颗种子等着那场雨
+            let gated = plant.needs_rain_to_sprout()
+                && plant.stage() == Stage::Seed
+                && !raining;
+            if plant.progress < 1.0 && !gated {
                 plant.progress = (plant.progress
                     + dt * plant.genes.growth_rate * weather_mul / BASE_GROW_SECS)
                     .min(1.0);
@@ -321,6 +343,57 @@ impl Garden {
         }
         self.apply_neighbor_effects(dt, weather);
         self.last_tick = now();
+    }
+
+    /// 陨星花种子：流星带来的唯一产物，天生自发光。
+    pub fn meteor_seed(rng: &mut impl Rng) -> Genes {
+        Genes {
+            hue: rng.gen_range(0.0..360.0),
+            saturation: rng.gen_range(0.35..0.6), // 星尘偏淡
+            petal_shape: 15,
+            height: rng.gen_range(11..17),
+            growth_rate: rng.gen_range(0.85..1.15),
+            glow: true,
+        }
+    }
+
+    /// 轴5 时间尺度：昙花开一夜、天明即谢。
+    ///
+    /// cozy 契约的处理方式——**谢掉留下 2-3 颗种子（净赚，不是损失）**，
+    /// 且花苞期 HUD 就会预告"今夜绽放，天明即谢"。真正会失去的只有
+    /// "亲眼看见它开着"这件事，所以它是奖励在场、而不是惩罚离开。
+    pub fn settle_ephemeral(&mut self, weather: &Weather, rng: &mut impl Rng) -> Vec<String> {
+        use crate::genetics::display_name;
+        let night = weather.darkness() > 0.5;
+        let mut notes = Vec::new();
+        let mut withered: Vec<(usize, Genes)> = Vec::new();
+
+        for (i, slot) in self.plots.iter_mut().enumerate() {
+            let Some(p) = slot else { continue };
+            if !p.is_ephemeral() || p.stage() != Stage::Bloom {
+                continue;
+            }
+            if night {
+                p.had_bloom_night = true;
+            } else if p.had_bloom_night {
+                withered.push((i, p.genes.clone()));
+            }
+        }
+
+        for (i, genes) in withered {
+            self.plots[i] = None;
+            let n = rng.gen_range(2..=3);
+            for _ in 0..n {
+                self.seeds.push(Genes::cross(&genes, &genes, rng));
+            }
+            notes.push(format!(
+                "「{}」在天亮时静静合上了——它留下了 {} 颗种子（{}号地）。",
+                display_name(&genes),
+                n,
+                i + 1
+            ));
+        }
+        notes
     }
 
     /// 系统六轴 3：邻居关系。触手藤让两侧枯萎、曼德拉草夜间供养两侧——
@@ -431,6 +504,16 @@ impl Garden {
                         ));
                     }
                 }
+                // 轴1 MeteorDrop：陨星花的**唯一**来源。突变表里没有它，
+                // 只有流星真的落进花园才会留下这颗种子
+                if rng.gen_bool(0.35) {
+                    let seed = Self::meteor_seed(&mut rng);
+                    journal.push(format!(
+                        "焦黑的土坑中央躺着一颗还温热的种子：「{}」。",
+                        display_name(&seed)
+                    ));
+                    self.seeds.push(seed);
+                }
             }
 
             // --- 野蜂：有相邻盛开的两株时，免费替你授一次粉 ---
@@ -493,6 +576,7 @@ impl Garden {
             last_care: now(),
             planted_at: now(),
             last_gift: now(),
+            had_bloom_night: false,
         });
         true
     }
@@ -602,6 +686,7 @@ mod tests {
             last_care: 0,
             planted_at: now(),
             last_gift: now(),
+            had_bloom_night: false,
         }
     }
 
@@ -861,5 +946,103 @@ mod tests {
         let v = g.plots[0].as_ref().unwrap().vitality;
         // 24 小时后仍应明显高于"蔫"的提示阈值 0.6
         assert!(v > 0.6, "24h away should not wilt; vitality was {v}");
+    }
+
+    /// 一个白天/夜晚的天气（只有 clock 影响 darkness）。
+    fn weather_at(clock: f32) -> Weather {
+        let mut rng = rand::thread_rng();
+        let mut w = Weather::new(&mut rng);
+        w.kind = crate::weather::Kind::Sunny;
+        w.clock = clock;
+        w
+    }
+
+    #[test]
+    fn ephemeral_blooms_through_night_then_withers_at_dawn() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.plots[0] = Some(bloom(16)); // 昙花
+        let seeds_before = g.seeds.len();
+
+        // 白天还没经历过绽放之夜 → 不该谢
+        assert!(g.settle_ephemeral(&weather_at(0.3), &mut rng).is_empty());
+        assert!(g.plots[0].is_some(), "must not wither before its night");
+
+        // 夜里绽放，记下这一夜
+        assert!(g.settle_ephemeral(&weather_at(0.72), &mut rng).is_empty());
+        assert!(g.plots[0].as_ref().unwrap().had_bloom_night);
+        assert!(g.plots[0].is_some(), "must stay through the night");
+
+        // 天亮：谢掉，但留下 2-3 颗种子
+        let notes = g.settle_ephemeral(&weather_at(0.3), &mut rng);
+        assert_eq!(notes.len(), 1);
+        assert!(g.plots[0].is_none(), "should have withered at dawn");
+        let gained = g.seeds.len() - seeds_before;
+        assert!(
+            (2..=3).contains(&gained),
+            "withering must be a net gain (2-3 seeds), got {gained}"
+        );
+    }
+
+    /// cozy 契约：昙花是唯一会谢的品种，其余任何品种都不得因时间流逝消失。
+    #[test]
+    fn only_ephemeral_ever_withers() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        for v in 0..crate::genetics::VARIETIES {
+            if v == 16 {
+                continue;
+            }
+            g.plots[0] = Some(bloom(v));
+            for clock in [0.72, 0.3, 0.72, 0.3] {
+                g.settle_ephemeral(&weather_at(clock), &mut rng);
+            }
+            assert!(g.plots[0].is_some(), "variety {v} must never wither");
+        }
+    }
+
+    #[test]
+    fn storm_seed_waits_for_rain_to_sprout() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        let mut seed = bloom(14); // 雷纹花
+        seed.progress = 0.0;
+        g.plots[0] = Some(seed);
+
+        let mut sunny = weather_at(0.3);
+        sunny.kind = crate::weather::Kind::Sunny;
+        g.grow(600.0, &sunny);
+        assert_eq!(
+            g.plots[0].as_ref().unwrap().progress,
+            0.0,
+            "storm seed must not sprout without rain"
+        );
+
+        let mut rainy = weather_at(0.3);
+        rainy.kind = crate::weather::Kind::Rain;
+        g.grow(600.0, &rainy);
+        assert!(
+            g.plots[0].as_ref().unwrap().progress > 0.0,
+            "storm seed should sprout once it rains"
+        );
+    }
+
+    #[test]
+    fn meteor_flower_is_unobtainable_by_mutation() {
+        let mut rng = rand::thread_rng();
+        let a = bloom(0).genes;
+        let b = bloom(1).genes;
+        // 陨星花只能由流星带来，突变表里不该出现它
+        for _ in 0..20_000 {
+            assert_ne!(
+                Genes::cross(&a, &b, &mut rng).petal_shape,
+                15,
+                "meteor flower must only come from a meteor strike"
+            );
+        }
+        // 而流星确实给的是它，且天生自发光
+        let seed = Garden::meteor_seed(&mut rng);
+        assert_eq!(seed.petal_shape, 15);
+        assert!(seed.glow);
     }
 }

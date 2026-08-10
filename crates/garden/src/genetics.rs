@@ -20,8 +20,8 @@ pub struct Genes {
     pub glow: bool,
 }
 
-/// 品种总数：4 花卉 + 2 草蕨 + 2 异界 + 2 炼金 + 2 水生 + 2 天时
-pub const VARIETIES: u8 = 14;
+/// 品种总数：4 花卉 + 2 草蕨 + 2 异界 + 2 炼金 + 2 水生 + 5 天时
+pub const VARIETIES: u8 = 17;
 
 /// 五大科系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +66,10 @@ pub fn variety_name(v: u8) -> &'static str {
         10 => "海葵",
         11 => "珊瑚",
         12 => "月见花",
-        _ => "日晷花",
+        13 => "日晷花",
+        14 => "雷纹花",
+        15 => "陨星花",
+        _ => "昙花",
     }
 }
 
@@ -188,7 +191,8 @@ impl Genes {
         } else if rng.gen_bool(0.025) {
             petal_shape = [6, 7, 8, 9][rng.gen_range(0..4)]; // 异界 / 炼金觉醒
         } else if rng.gen_bool(0.02) {
-            petal_shape = [12, 13][rng.gen_range(0..2)]; // 天时科觉醒
+            // 天时科觉醒。**陨星花(15) 不在此列**——它只能由流星带来
+            petal_shape = [12, 13, 14, 16][rng.gen_range(0..4)];
         }
         if (a.petal_shape >= 10 || b.petal_shape >= 10) && rng.gen_bool(0.35) {
             petal_shape = 10 + rng.gen_range(0..2); // 水生血统强遗传
