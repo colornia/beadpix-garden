@@ -104,6 +104,15 @@ pub struct Garden {
     /// 玩家钉住的目标表型（定向育种的参照）
     #[serde(default)]
     pub pinned: Option<Genes>,
+    /// 当前活跃委托（每真实周轮换）
+    #[serde(default)]
+    pub quests: Vec<crate::quest::Quest>,
+    /// 委托所属周序号；与当前周不同则轮换
+    #[serde(default)]
+    pub quest_week: u64,
+    /// 累计完成的委托数（长期成就感）
+    #[serde(default)]
+    pub quests_done: u32,
 }
 
 impl Garden {
@@ -126,7 +135,44 @@ impl Garden {
             compost: 0,
             breeding_log: Vec::new(),
             pinned: None,
+            quests: crate::quest::weekly_quests(crate::quest::current_week(), 3),
+            quest_week: crate::quest::current_week(),
+            quests_done: 0,
         }
+    }
+
+    /// 委托轮换（每真实周）+ 达成检查。返回本次新达成的委托描述与奖励。
+    pub fn update_quests(&mut self, rng: &mut impl Rng) -> Vec<String> {
+        let week = crate::quest::current_week();
+        if self.quests.is_empty() || self.quest_week != week {
+            self.quests = crate::quest::weekly_quests(week, 3);
+            self.quest_week = week;
+        }
+        let mut completed = Vec::new();
+        for i in 0..self.quests.len() {
+            if self.quests[i].done || !self.quests[i].check(self) {
+                continue;
+            }
+            self.quests[i].done = true;
+            self.quests_done += 1;
+            let reward = self.quests[i].reward_compost;
+            let seed_reward = self.quests[i].reward_seed;
+            let title = self.quests[i].title.clone();
+            self.compost += reward;
+            let mut extra = String::new();
+            if seed_reward {
+                // 稀有种：异界/炼金科系
+                let mut gift = Genes::wild(rng, self.biome);
+                gift.petal_shape = [6u8, 7, 8, 9][rng.gen_range(0..4)];
+                extra = format!("，以及一颗稀有种「{}」", crate::genetics::display_name(&gift));
+                self.seeds.push(gift);
+            }
+            completed.push(format!(
+                "✦ 委托达成「{}」！获得 {} 堆肥{}。",
+                title, reward, extra
+            ));
+        }
+        completed
     }
 
     /// 一株成熟植株的堆肥价值：稀有科系产出高，发光基因加成，

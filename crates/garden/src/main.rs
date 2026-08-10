@@ -1,6 +1,7 @@
 mod bmp;
 mod garden;
 mod genetics;
+mod quest;
 mod render;
 mod weather;
 
@@ -73,6 +74,8 @@ fn main() -> std::io::Result<()> {
     let mut selected: usize = 0;
     let mut time = 0.0f32;
     let mut gallery = false;
+    // HUD 第一行的显示模式：0=状态 1=委托列表
+    let mut hud_mode = 0u8;
     // 花头位置：锚点上方株高处（蜜蜂和迸发粒子的目标点）
     let head_of = |garden: &Garden, i: usize| -> Option<(f32, f32)> {
         let pts = render::anchors(
@@ -157,6 +160,9 @@ fn main() -> std::io::Result<()> {
                 } else {
                     String::from("这里没有盛开的花可以收获。")
                 };
+            }
+            Some(KeyCode::Char('q')) | Some(KeyCode::Char('Q')) => {
+                hud_mode = if hud_mode == 0 { 1 } else { 0 };
             }
             Some(KeyCode::Char('w')) | Some(KeyCode::Char('W')) => {
                 // 浇水：选中株；已经很精神就全园浇一遍
@@ -252,6 +258,11 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
+        // --- 委托：轮换 + 达成检查（脊椎）---
+        for done in garden.update_quests(&mut rng) {
+            message = done;
+        }
+
         if let Some((sp, glow)) = newly {
             garden.discover(&sp);
             message = format!(
@@ -282,6 +293,7 @@ fn main() -> std::io::Result<()> {
                 selected,
                 &message,
                 fast,
+                hud_mode,
             )?;
         }
 
@@ -459,6 +471,7 @@ fn draw_hud(
     selected: usize,
     message: &str,
     fast: bool,
+    hud_mode: u8,
 ) -> std::io::Result<()> {
     // 杂交预览优先：当前块与右侧块都盛开时，显示子代预测范围
     let preview = garden.plots.get(selected).and_then(|s| s.as_ref()).and_then(|a| {
@@ -532,21 +545,41 @@ fn draw_hud(
         Some(c) => format!("{}", c),
         None => String::from("满"),
     };
-    let line1 = format!(
-        " {} · {}·{}{} | 种子x{} 堆肥x{}(扩张需{}) | 图鉴{}/{} | {}",
-        garden.biome.name(),
-        weather.period_name(),
-        weather.name(),
-        if fast { " [x20]" } else { "" },
-        garden.seeds.len(),
-        garden.compost,
-        expand_hint,
-        garden.discovered.len(),
-        TOTAL_SPECIES,
-        info
-    );
+    let line1 = if hud_mode == 1 {
+        // 委托面板：脊椎——够得着又永远差一点的追逐
+        let items: Vec<String> = garden
+            .quests
+            .iter()
+            .map(|q| {
+                format!(
+                    "{}{}",
+                    if q.done { "✔" } else { "○" },
+                    q.describe()
+                )
+            })
+            .collect();
+        format!(
+            " ✦本周委托(累计完成{}) {} | [Q]返回状态",
+            garden.quests_done,
+            items.join("  ")
+        )
+    } else {
+        format!(
+            " {} · {}·{}{} | 种子x{} 堆肥x{}(扩张需{}) | 图鉴{}/{} | {}",
+            garden.biome.name(),
+            weather.period_name(),
+            weather.name(),
+            if fast { " [x20]" } else { "" },
+            garden.seeds.len(),
+            garden.compost,
+            expand_hint,
+            garden.discovered.len(),
+            TOTAL_SPECIES,
+            info
+        )
+    };
     let line2 = format!(
-        " [←→↑↓]选 [回车]种 [W]浇水 [H]收 [X]杂交 [P]钉目标 [C]堆肥 [E]扩张 [B]图鉴 [Esc]退出 | {}",
+        " [←→↑↓]选 [回车]种 [W]浇水 [H]收 [X]杂交 [P]钉 [C]堆肥 [E]扩张 [Q]委托 [B]图鉴 [Esc]退出 | {}",
         message
     );
     let width = cols as usize;
