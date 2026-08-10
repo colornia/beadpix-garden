@@ -1,6 +1,10 @@
-# beadpix 项目备忘
+# beadpix-garden 项目备忘
 
-终端高分辨率像素项目：Cargo workspace，三个 crate。用户语言：中文。
+终端像素花园挂机游戏：Cargo workspace，两个 crate。用户语言：中文。
+
+> 人脸项目已拆到独立仓库 [beadpix-face](https://github.com/colornia/beadpix-face)
+> （本地 `E:\desktop\beadpix-face`），**各自持有一份 `crates/beadpix` 副本**，
+> 允许独立演进。引擎改动若两边都需要，手动同步那个文件。
 
 ## 结构
 
@@ -16,7 +20,6 @@
 - 游戏逻辑有 14 项测试（`garden.rs` 底部 mod tests），改经济/照料/离线规则后跑
   `cargo test -p garden --target-dir <scratchpad>/build`。其中两项守护 cozy 契约：
   植物永不死亡、每天来一次的玩家看不到蔫——**这两条测试不许改成通过为止**
-- `crates/face`：数字人脸，60fps，参数化表情，`R` 键切换半块/混合渲染
 
 ## 关键约定
 
@@ -58,4 +61,3 @@
 - 布景深化：装饰格、自由摆放坐标（当前只有地块间移植）
 - 图鉴按 常见/角色/传说 分层展示（现在只有统计，网格仍是扁平的）
 - 访客/明信片分享——用户说过"不着急"
-- face 项目：摄像头驱动是远期目标

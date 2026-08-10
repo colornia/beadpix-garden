@@ -63,15 +63,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "face"
-version = "0.1.0"
-dependencies = [
- "beadpix",
- "crossterm",
- "rand",
-]
-
-[[package]]
 name = "garden"
 version = "0.1.0"
 dependencies = [

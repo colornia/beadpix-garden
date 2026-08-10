@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/beadpix", "crates/garden", "crates/face"]
+members = ["crates/beadpix", "crates/garden"]
 
 [workspace.dependencies]
 crossterm = "0.28"
