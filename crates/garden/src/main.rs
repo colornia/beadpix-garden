@@ -77,6 +77,8 @@ fn main() -> std::io::Result<()> {
     let mut gallery = false;
     // HUD 第一行的显示模式：0=状态 1=委托列表
     let mut hud_mode = 0u8;
+    // 移植模式：Some(源地块)，再选一块地即完成搬迁/互换
+    let mut moving: Option<usize> = None;
     // 花头位置：锚点上方株高处（蜜蜂和迸发粒子的目标点）
     let head_of = |garden: &Garden, i: usize| -> Option<(f32, f32)> {
         let pts = render::anchors(
@@ -164,6 +166,34 @@ fn main() -> std::io::Result<()> {
             }
             Some(KeyCode::Char('q')) | Some(KeyCode::Char('Q')) => {
                 hud_mode = if hud_mode == 0 { 1 } else { 0 };
+            }
+            Some(KeyCode::Char('m')) | Some(KeyCode::Char('M')) => {
+                message = match moving {
+                    None => match &garden.plots[selected] {
+                        Some(p) => {
+                            moving = Some(selected);
+                            format!(
+                                "拿起了「{}」，移动光标到目标地块再按 M 放下（M 取消）。",
+                                display_name(&p.genes)
+                            )
+                        }
+                        None => String::from("这块地是空的，没有可移植的植株。"),
+                    },
+                    Some(src) if src == selected => {
+                        moving = None;
+                        String::from("放回原处了。")
+                    }
+                    Some(src) => {
+                        let swapped = garden.plots[selected].is_some();
+                        garden.relocate(src, selected);
+                        moving = None;
+                        if swapped {
+                            String::from("两株换了位置。")
+                        } else {
+                            String::from("移植完成。")
+                        }
+                    }
+                };
             }
             Some(KeyCode::Char('w')) | Some(KeyCode::Char('W')) => {
                 // 浇水：选中株；已经很精神就全园浇一遍
@@ -279,7 +309,7 @@ fn main() -> std::io::Result<()> {
         if gallery {
             scene.draw_gallery(&mut canvas, &garden, time);
         } else {
-            scene.draw(&mut canvas, &garden, &weather, selected, time, dt);
+            scene.draw(&mut canvas, &garden, &weather, selected, time, dt, moving);
         }
         renderer.present(&canvas, session.out(), 1, 1)?;
         if gallery {
@@ -366,7 +396,7 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
             w.clock = clock;
         }
         w.rainbow = rainbow;
-        scene.draw(&mut canvas, &g, &w, 2, 1.5, 0.033);
+        scene.draw(&mut canvas, &g, &w, 2, 1.5, 0.033, None);
         let name = format!("garden_{}.bmp", tag);
         bmp::write_bmp(&Path::new(dir).join(&name), &canvas, 6)?;
         println!("wrote {}", name);
@@ -618,7 +648,7 @@ fn draw_hud(
         )
     };
     let line2 = format!(
-        " [←→↑↓]选 [回车]种 [W]浇水 [H]收 [X]杂交 [P]钉 [C]堆肥 [E]扩张 [Q]委托 [B]图鉴 [Esc]退出 | {}",
+        " [←→↑↓]选 [回车]种 [W]浇水 [H]收 [X]杂交 [M]移植 [P]钉 [C]堆肥 [E]扩张 [Q]委托 [B]图鉴 [Esc]退出 | {}",
         message
     );
     let width = cols as usize;

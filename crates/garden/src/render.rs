@@ -181,6 +181,7 @@ impl Scene {
         selected: usize,
         time: f32,
         dt: f32,
+        moving: Option<usize>,
     ) {
         let w = canvas.width();
         let h = canvas.height();
@@ -240,14 +241,19 @@ impl Scene {
                     blooms.push((b.0, b.1, b.2, b.3, b.4, plant.vitality));
                 }
             }
-            if i == selected {
+            if i == selected || Some(i) == moving {
                 let cy = ay + 4;
                 let blink = ((time * 3.0).sin() * 0.5 + 0.5) * 255.0;
-                let c = Rgb::new(255, 255, 255);
-                canvas.blend(ax, cy, c, blink as u8);
-                canvas.blend(ax - 1, cy + 1, c, blink as u8);
-                canvas.blend(ax, cy + 1, c, blink as u8);
-                canvas.blend(ax + 1, cy + 1, c, blink as u8);
+                // 被拿起的那株用琥珀色标记，光标仍是白色
+                let (c, a) = if Some(i) == moving {
+                    (Rgb::new(255, 200, 90), 220.0)
+                } else {
+                    (Rgb::new(255, 255, 255), blink)
+                };
+                canvas.blend(ax, cy, c, a as u8);
+                canvas.blend(ax - 1, cy + 1, c, a as u8);
+                canvas.blend(ax, cy + 1, c, a as u8);
+                canvas.blend(ax + 1, cy + 1, c, a as u8);
             }
         }
 

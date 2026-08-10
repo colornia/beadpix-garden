@@ -221,6 +221,20 @@ impl Garden {
         false
     }
 
+    /// 移植：把 from 的植株搬到 to（空地则搬过去，有植株则两株互换）。
+    /// 花园即画布——配合邻居效果，"什么该挨着什么"成了摆放谜题。
+    /// 移植不损伤植株（cozy 契约：没有失败惩罚）。
+    pub fn relocate(&mut self, from: usize, to: usize) -> bool {
+        if from == to || from >= self.plots.len() || to >= self.plots.len() {
+            return false;
+        }
+        if self.plots[from].is_none() {
+            return false;
+        }
+        self.plots.swap(from, to);
+        true
+    }
+
     /// 浇水：+0.3 vitality，蔫的立刻复原。永远是正向动作，没有惩罚。
     /// 返回 Some(浇水后的活力) 表示成功。
     pub fn water(&mut self, plot: usize) -> Option<f32> {
@@ -639,6 +653,52 @@ mod tests {
         let last = g.plots.len() - 1;
         g.plots[last] = Some(bloom(0));
         assert!(g.cross_breed(last, &mut rng).is_none());
+    }
+
+    #[test]
+    fn relocate_moves_into_empty_and_swaps_when_occupied() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.plots[0] = Some(bloom(6)); // 眼球花
+        assert!(g.relocate(0, 2), "move into empty bed");
+        assert!(g.plots[0].is_none());
+        assert_eq!(g.plots[2].as_ref().unwrap().genes.petal_shape, 6);
+
+        g.plots[3] = Some(bloom(9)); // 贤者金花
+        assert!(g.relocate(2, 3), "swap with occupied bed");
+        assert_eq!(g.plots[3].as_ref().unwrap().genes.petal_shape, 6);
+        assert_eq!(g.plots[2].as_ref().unwrap().genes.petal_shape, 9);
+    }
+
+    #[test]
+    fn relocate_rejects_empty_source_and_out_of_range() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        assert!(!g.relocate(0, 1), "empty source is a no-op");
+        g.plots[0] = Some(bloom(0));
+        assert!(!g.relocate(0, 0), "same bed is a no-op");
+        assert!(!g.relocate(0, 99), "out of range is a no-op");
+        assert!(g.plots[0].is_some(), "plant survives every rejected move");
+    }
+
+    #[test]
+    fn withering_neighbour_drains_only_its_neighbours() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        // 触手藤(7) 使两侧枯萎；把它放在 1 号位
+        g.plots[1] = Some(bloom(7));
+        g.plots[0] = Some(bloom(0));
+        g.plots[2] = Some(bloom(0));
+        g.plots[4] = Some(bloom(0)); // 不相邻，应不受影响
+        let w = Weather::new(&mut rng);
+        // 推进相当于数天的邻居效果
+        for _ in 0..200 {
+            g.apply_neighbor_effects(3600.0, &w);
+        }
+        let left = g.plots[0].as_ref().unwrap().vitality;
+        let far = g.plots[4].as_ref().unwrap().vitality;
+        assert!(left < far, "neighbour {left} should wither below distant {far}");
+        assert!(left >= 0.15, "even withered plants keep the floor");
     }
 
     #[test]
