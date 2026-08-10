@@ -58,7 +58,7 @@ fn main() -> std::io::Result<()> {
     let time_scale: f32 = if fast { 20.0 } else { 1.0 };
 
     let mut garden = Garden::load(&save_path()).unwrap_or_else(|| Garden::new(&mut rng));
-    let offline = garden.settle_offline();
+    let (offline, journal) = garden.settle_offline();
 
     let (cols, rows) = TerminalSession::size()?;
     let canvas_w = (cols as u32).clamp(40, 200);
@@ -86,7 +86,12 @@ fn main() -> std::io::Result<()> {
             .as_ref()
             .map(|p| (pts[i].0 as f32, (pts[i].1 - p.genes.height as i32) as f32))
     };
-    let mut message = if offline > 60 {
+    // 离线日记：回访第一眼看到"你不在时发生了什么"，按任意键进入花园
+    let mut message = if !journal.is_empty() {
+        show_journal(&mut session, cols, rows, offline, &journal)?;
+        renderer.invalidate();
+        String::from("欢迎回来。")
+    } else if offline > 60 {
         format!("欢迎回来！离开的 {} 分钟里植物们一直在生长。", offline / 60)
     } else {
         format!("欢迎来到{}花园！", garden.biome.name())
@@ -151,6 +156,16 @@ fn main() -> std::io::Result<()> {
                     String::from("收获了！获得了继承它基因的种子。")
                 } else {
                     String::from("这里没有盛开的花可以收获。")
+                };
+            }
+            Some(KeyCode::Char('w')) | Some(KeyCode::Char('W')) => {
+                // 浇水：选中株；已经很精神就全园浇一遍
+                message = match garden.water(selected) {
+                    Some(v) => format!("浇了水，它舒展开来（活力 {:.0}%）。", v * 100.0),
+                    None => match garden.water_all() {
+                        0 => String::from("花园里的植物都很精神，不需要浇水。"),
+                        n => format!("给整座花园浇了水，{} 株舒展开来。", n),
+                    },
                 };
             }
             Some(KeyCode::Char('c')) | Some(KeyCode::Char('C')) => {
@@ -356,6 +371,57 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 离线日记页：回访时先讲"你不在时发生了什么"，按任意键进入花园。
+fn show_journal(
+    session: &mut TerminalSession,
+    cols: u16,
+    rows: u16,
+    offline: u64,
+    journal: &[String],
+) -> std::io::Result<()> {
+    let width = cols as usize;
+    let away = if offline >= 86_400 {
+        format!("{} 天", offline / 86_400)
+    } else if offline >= 3600 {
+        format!("{} 小时", offline / 3600)
+    } else {
+        format!("{} 分钟", offline.max(60) / 60)
+    };
+    let mut lines = vec![
+        String::new(),
+        format!("  你离开了 {}。这段时间里——", away),
+        String::new(),
+    ];
+    for entry in journal {
+        lines.push(format!("   · {}", entry));
+        lines.push(String::new());
+    }
+    lines.push(String::from("  按任意键回到花园"));
+
+    let out = session.out();
+    write!(out, "\x1b[2J\x1b[0m\x1b[48;2;18;20;28m")?;
+    for r in 1..=rows {
+        let content = lines.get(r as usize - 2).cloned().unwrap_or_default();
+        let styled = if content.contains('·') {
+            format!("\x1b[38;2;190;225;175m{}", pad_line(&content, width))
+        } else {
+            format!("\x1b[38;2;225;225;235m{}", pad_line(&content, width))
+        };
+        write!(out, "\x1b[{};1H{}", r, styled)?;
+    }
+    write!(out, "\x1b[0m")?;
+    out.flush()?;
+
+    // 阻塞等待按键
+    loop {
+        if TerminalSession::poll_key(Duration::from_millis(50))?.is_some() {
+            break;
+        }
+    }
+    write!(session.out(), "\x1b[2J")?;
+    session.out().flush()
+}
+
 /// 图鉴页 HUD：行=花型、列=色系的导读 + 收集进度。
 fn draw_gallery_hud(
     session: &mut TerminalSession,
@@ -443,13 +509,19 @@ fn draw_hud(
                         )
                     })
                     .unwrap_or_default();
+                let vit = if p.vitality < 0.6 {
+                    format!(" 活力{:.0}%(需浇水)", p.vitality * 100.0)
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{}号地: [{}] {} {} {:.0}%{}",
+                    "{}号地: [{}] {} {} {:.0}%{}{}",
                     selected + 1,
                     fam,
                     display_name(&p.genes),
                     stage,
                     p.progress * 100.0,
+                    vit,
                     pin_delta,
                 )
             }
@@ -474,7 +546,7 @@ fn draw_hud(
         info
     );
     let line2 = format!(
-        " [←→↑↓]选 [回车]种 [H]收 [X]杂交 [C]堆肥 [E]扩张 [B]图鉴 [Esc]退出 | {}",
+        " [←→↑↓]选 [回车]种 [W]浇水 [H]收 [X]杂交 [P]钉目标 [C]堆肥 [E]扩张 [B]图鉴 [Esc]退出 | {}",
         message
     );
     let width = cols as usize;

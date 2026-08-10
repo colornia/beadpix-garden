@@ -199,7 +199,8 @@ impl Scene {
 
         // --- 植株（按锚点顺序绘制：后排先画，前排自然遮挡）---
         let pts = anchors(biome, w, h, seed, garden.plots.len());
-        let mut blooms: Vec<(i32, i32, Rgb, bool, u8)> = Vec::new();
+        // (x, y, 主色, 发光基因, 品种, vitality)
+        let mut blooms: Vec<(i32, i32, Rgb, bool, u8, f32)> = Vec::new();
         for (i, slot) in garden.plots.iter().enumerate() {
             let (ax, ay) = pts[i];
             match biome {
@@ -232,9 +233,11 @@ impl Scene {
                 }
             }
             if let Some(plant) = slot {
-                let wind = weather.wind() * gust(time, ax);
-                if let Some(bloom) = self.draw_plant(canvas, plant, ax, ay, wind, time) {
-                    blooms.push(bloom);
+                // 活力低 → 额外的固定"垂头"弯曲，视觉上就是蔫了（可逆，浇水即复原）
+                let droop = (1.0 - plant.vitality).max(0.0) * 1.6;
+                let wind = weather.wind() * gust(time, ax) * (0.5 + plant.vitality * 0.5) + droop;
+                if let Some(b) = self.draw_plant(canvas, plant, ax, ay, wind, time) {
+                    blooms.push((b.0, b.1, b.2, b.3, b.4, plant.vitality));
                 }
             }
             if i == selected {
@@ -249,7 +252,7 @@ impl Scene {
         }
 
         // --- 花瓣飘落：只有花卉科会撒花瓣（草蕨撒孢子没那么浪漫，触手就更别提了）---
-        for (i, &(bx, by, c, _, variety)) in blooms.iter().enumerate() {
+        for (i, &(bx, by, c, _, variety, _)) in blooms.iter().enumerate() {
             if variety <= 3 && ((time * 0.31 + i as f32 * 0.77).fract()) < dt * 0.12 {
                 self.petals.push((bx as f32, by as f32 + 2.0, i as f32, c, 4.0));
             }
@@ -378,9 +381,15 @@ impl Scene {
 
         // --- 收集光源（光强随黑暗度渐变，黄昏时花光慢慢亮起）---
         let dark = weather.darkness();
-        for (i, &(x, y, c, glows, variety)) in blooms.iter().enumerate() {
+        for (i, &(x, y, c, glows, variety, vit)) in blooms.iter().enumerate() {
             let pulse = ((time * 1.1 + i as f32 * 1.7).sin() * 0.5 + 0.5) * 0.25;
-            let (nr, ng, nb) = (c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0);
+            // 活力直接调制光强——蔫的花光会暗下去，浇水就亮回来
+            let v = 0.35 + 0.65 * vit.clamp(0.0, 1.0);
+            let (nr, ng, nb) = (
+                c.r as f32 / 255.0 * v,
+                c.g as f32 / 255.0 * v,
+                c.b as f32 / 255.0 * v,
+            );
             // 异界/炼金/水生品种自带微光（贤者金花昼夜常亮）
             let intrinsic = matches!(variety, 6 | 7 | 10 | 11);
             if glows {
@@ -422,7 +431,7 @@ impl Scene {
             let glow = (phase.sin() * 0.5 + 0.5) * 255.0;
             canvas.blend(x as i32, y as i32, Rgb::new(225, 255, 160), glow as u8);
         }
-        for (i, &(x, y, color, glows, _)) in blooms.iter().enumerate() {
+        for (i, &(x, y, color, glows, _, _)) in blooms.iter().enumerate() {
             if glows {
                 // 发光花的花体提亮 + 光尘上飘
                 soft_circle(canvas, x, y, 4, color.lerp(Rgb::WHITE, 0.5), 60);

@@ -175,6 +175,32 @@ impl Garden {
         false
     }
 
+    /// 浇水：+0.3 vitality，蔫的立刻复原。永远是正向动作，没有惩罚。
+    /// 返回 Some(浇水后的活力) 表示成功。
+    pub fn water(&mut self, plot: usize) -> Option<f32> {
+        let plant = self.plots.get_mut(plot)?.as_mut()?;
+        if plant.vitality >= 0.995 {
+            return None; // 已经很精神了，不用浇
+        }
+        plant.vitality = (plant.vitality + 0.3).min(1.0);
+        plant.last_care = now();
+        Some(plant.vitality)
+    }
+
+    /// 全园浇水（地块多了以后逐块浇太繁琐）。返回浇了几株。
+    pub fn water_all(&mut self) -> usize {
+        let t = now();
+        let mut n = 0;
+        for p in self.plots.iter_mut().flatten() {
+            if p.vitality < 0.995 {
+                p.vitality = (p.vitality + 0.3).min(1.0);
+                p.last_care = t;
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// 图鉴收录；是新品种则返回 true。
     pub fn discover(&mut self, species: &str) -> bool {
         if self.discovered.iter().any(|s| s == species) {
@@ -186,32 +212,142 @@ impl Garden {
     }
 
     /// 推进生长。`dt` 为真实秒数，天气提供倍率（雨天加速等）。
+    /// vitality 按真实时间极缓下降（约 24h 才明显蔫），下雨自动补水——
+    /// 每天来一次的玩家永远看不到蔫。
     pub fn grow(&mut self, dt: f32, weather: &Weather) {
         let weather_mul = weather.growth_multiplier();
+        let raining = weather.kind == crate::weather::Kind::Rain;
         for plant in self.plots.iter_mut().flatten() {
             if plant.progress < 1.0 {
                 plant.progress = (plant.progress
                     + dt * plant.genes.growth_rate * weather_mul / BASE_GROW_SECS)
                     .min(1.0);
             }
+            if raining {
+                plant.vitality = (plant.vitality + dt / 90.0).min(1.0); // 雨天润物
+            } else {
+                plant.vitality = (plant.vitality - dt / 86_400.0 * 0.35).max(0.15);
+            }
         }
         self.last_tick = now();
     }
 
-    /// 读档后结算离线时间（离线期间按晴天速率算）。返回离线秒数用于提示。
-    pub fn settle_offline(&mut self) -> u64 {
+    /// 读档后结算离线时间：生长照常，另外用 seeded RNG（以存档时间做种，
+    /// 防回档刷事件）roll 出"你不在时发生了什么"——事件留下可发现的痕迹
+    /// （流星真的改了花色、野蜂真的授了粉），日记只挑高光展示。
+    /// 返回 (离线秒数, 日记条目)。
+    pub fn settle_offline(&mut self) -> (u64, Vec<String>) {
+        use crate::genetics::display_name;
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+
         let elapsed = now().saturating_sub(self.last_tick);
+        let mut journal = Vec::new();
+        let mut rng = StdRng::seed_from_u64(self.last_tick ^ self.world_seed as u64);
+
         if elapsed > 0 {
-            for plant in self.plots.iter_mut().flatten() {
-                if plant.progress < 1.0 {
-                    plant.progress = (plant.progress
-                        + elapsed as f32 * plant.genes.growth_rate / BASE_GROW_SECS)
-                        .min(1.0);
+            // --- 生长 + 记录谁在离线时开了花 ---
+            let mut newly_bloomed = Vec::new();
+            for (i, plant) in self.plots.iter_mut().enumerate() {
+                if let Some(p) = plant {
+                    let before = p.stage();
+                    if p.progress < 1.0 {
+                        p.progress = (p.progress
+                            + elapsed as f32 * p.genes.growth_rate / BASE_GROW_SECS)
+                            .min(1.0);
+                    }
+                    if before != Stage::Bloom && p.stage() == Stage::Bloom {
+                        newly_bloomed.push((i, display_name(&p.genes)));
+                    }
                 }
             }
+            for (i, name) in newly_bloomed.iter().take(2) {
+                journal.push(format!("「{}」在你离开时悄悄开花了（{}号地）。", name, i + 1));
+            }
+
+            // --- vitality 按真实时间缓降：约 24h 无照料才明显，地板 0.15 永不为 0 ---
+            let decay = elapsed as f32 / 86_400.0 * 0.35;
+            let mut wilted = false;
+            for p in self.plots.iter_mut().flatten() {
+                let old = p.vitality;
+                p.vitality = (p.vitality - decay).max(0.15);
+                if old >= 0.6 && p.vitality < 0.6 {
+                    wilted = true;
+                }
+            }
+            if wilted {
+                journal.push(String::from("有几株植物轻轻垂下了头——浇点水 [W] 它们就会精神起来。"));
+            }
+
+            let hours = elapsed as f32 / 3600.0;
+
+            // --- 流星：离开超过 2 小时有机会砸中一株，花色真的变了 ---
+            if hours > 2.0 && rng.gen_bool(0.25) {
+                let planted: Vec<usize> = self
+                    .plots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.is_some())
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&i) = planted.get(rng.gen_range(0..planted.len().max(1)).min(planted.len().saturating_sub(1))) {
+                    if let Some(p) = &mut self.plots[i] {
+                        let shift: f32 = rng.gen_range(20.0..40.0) * if rng.gen_bool(0.5) { 1.0 } else { -1.0 };
+                        p.genes.hue = (p.genes.hue + shift).rem_euclid(360.0);
+                        journal.push(format!(
+                            "夜里一颗流星掠过 {} 号地——「{}」的颜色变得和以前不一样了。",
+                            i + 1,
+                            display_name(&p.genes)
+                        ));
+                    }
+                }
+            }
+
+            // --- 野蜂：有相邻盛开的两株时，免费替你授一次粉 ---
+            if hours > 1.0 {
+                let pair = (0..self.plots.len().saturating_sub(1)).find(|&i| {
+                    matches!((&self.plots[i], &self.plots[i + 1]),
+                        (Some(a), Some(b)) if a.stage() == Stage::Bloom && b.stage() == Stage::Bloom)
+                });
+                if let Some(i) = pair {
+                    if rng.gen_bool(0.6) {
+                        if let Some(child) = self.cross_breed(i, &mut rng) {
+                            journal.push(format!(
+                                "一只野蜂在花间忙碌过——它替你授了粉，种子袋里多了「{}」。",
+                                display_name(&child)
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // --- 旅人：约每 12 小时一次机会，留下一颗种子（偶尔是稀有科系）---
+            let visitor_chances = ((hours / 12.0) as u32).min(2);
+            for _ in 0..visitor_chances {
+                if rng.gen_bool(0.5) {
+                    let mut gift = Genes::wild(&mut rng, self.biome);
+                    if rng.gen_bool(0.15) {
+                        gift.petal_shape = [6u8, 7, 8, 9][rng.gen_range(0..4)];
+                    }
+                    journal.push(format!(
+                        "一位旅人在篱笆边歇了歇脚，留下一颗种子作谢礼：「{}」。",
+                        display_name(&gift)
+                    ));
+                    self.seeds.push(gift);
+                }
+            }
+
+            // --- 天气流水（风味）---
+            if hours > 3.0 && journal.len() < 5 {
+                let rains = (hours / 6.0) as u32;
+                if rains > 0 {
+                    journal.push(format!("你离开的这些时候，花园里下了 {} 场雨。", rains));
+                }
+            }
+            journal.truncate(5);
         }
         self.last_tick = now();
-        elapsed
+        (elapsed, journal)
     }
 
     /// 在指定地块种下库存里的第一颗种子。
