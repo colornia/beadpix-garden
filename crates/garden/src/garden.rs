@@ -63,9 +63,34 @@ pub struct Plant {
     /// 上次照料的 Unix 时间戳（0 = 从未，按 last_tick 处理）
     #[serde(default)]
     pub last_care: u64,
+    /// 种下的时间戳，用于计算树龄（轴5 时间尺度）
+    #[serde(default)]
+    pub planted_at: u64,
+    /// 上次结出无偿种子的时间戳（古株的被动馈赠）
+    #[serde(default)]
+    pub last_gift: u64,
 }
 
+/// 成为"古株"所需的存活真实秒数（约 6 小时）。
+pub const VENERABLE_SECS: u64 = 6 * 3600;
+/// 古株结出无偿种子的间隔（约 2 小时）。
+pub const GIFT_INTERVAL_SECS: u64 = 2 * 3600;
+
 impl Plant {
+    /// 存活的真实秒数。
+    pub fn age(&self) -> u64 {
+        if self.planted_at == 0 {
+            return 0;
+        }
+        now().saturating_sub(self.planted_at)
+    }
+
+    /// 古株：活得够久的植株。苔痕虬枝，会不定期结出无偿种子——
+    /// 这是奖励你**别**堆肥它，与扩张经济形成反张力。
+    pub fn is_venerable(&self) -> bool {
+        self.stage() == Stage::Bloom && self.age() >= VENERABLE_SECS
+    }
+
     pub fn stage(&self) -> Stage {
         match self.progress {
             p if p < 0.15 => Stage::Seed,
@@ -184,8 +209,13 @@ impl Garden {
             _ => rng.gen_range(1..=3),
         };
         let glow_bonus = if plant.genes.glow { 3 } else { 0 };
+        // 古株积累的年岁也是价值——但它活着时每两小时白送一颗种子，
+        // 所以"堆肥换地"与"留着让它继续送"始终在互相拉扯
+        let age_bonus = if plant.is_venerable() { 4 } else { 0 };
         let scale = 0.5 + 0.5 * plant.vitality.clamp(0.0, 1.0);
-        (((base + glow_bonus) as f32) * scale).round().max(1.0) as u32
+        (((base + glow_bonus + age_bonus) as f32) * scale)
+            .round()
+            .max(1.0) as u32
     }
 
     /// 退役一株盛开的植株换堆肥。返回产出（失败返回 None）。
@@ -461,8 +491,33 @@ impl Garden {
             progress: 0.0,
             vitality: 1.0,
             last_care: now(),
+            planted_at: now(),
+            last_gift: now(),
         });
         true
+    }
+
+    /// 古株的被动馈赠：每隔一段时间无偿结出一颗继承自身基因的种子。
+    /// 返回本次收到的种子名（用于提示）。
+    pub fn collect_venerable_gifts(&mut self, rng: &mut impl Rng) -> Vec<String> {
+        use crate::genetics::display_name;
+        let t = now();
+        let mut gifts = Vec::new();
+        let mut new_seeds = Vec::new();
+        for p in self.plots.iter_mut().flatten() {
+            if !p.is_venerable() {
+                continue;
+            }
+            if t.saturating_sub(p.last_gift) < GIFT_INTERVAL_SECS {
+                continue;
+            }
+            p.last_gift = t;
+            let child = Genes::cross(&p.genes, &p.genes, rng);
+            gifts.push(display_name(&child));
+            new_seeds.push(child);
+        }
+        self.seeds.extend(new_seeds);
+        gifts
     }
 
     /// 收获盛开的花：移除植株，获得 2-3 颗继承其基因的种子。
@@ -545,7 +600,17 @@ mod tests {
             progress: 1.0,
             vitality: 1.0,
             last_care: 0,
+            planted_at: now(),
+            last_gift: now(),
         }
+    }
+
+    /// 一株已经活了 `secs` 秒的成熟植株。
+    fn aged_bloom(variety: u8, secs: u64) -> Plant {
+        let mut p = bloom(variety);
+        p.planted_at = now().saturating_sub(secs);
+        p.last_gift = now().saturating_sub(secs);
+        p
     }
 
     #[test]
@@ -653,6 +718,51 @@ mod tests {
         let last = g.plots.len() - 1;
         g.plots[last] = Some(bloom(0));
         assert!(g.cross_breed(last, &mut rng).is_none());
+    }
+
+    #[test]
+    fn a_plant_becomes_venerable_only_after_the_threshold() {
+        assert!(!bloom(0).is_venerable(), "a fresh bloom is not venerable");
+        assert!(
+            !aged_bloom(0, VENERABLE_SECS - 60).is_venerable(),
+            "just under the threshold is not venerable"
+        );
+        assert!(aged_bloom(0, VENERABLE_SECS + 60).is_venerable());
+        // 未开花的植株再老也不算古株
+        let mut young = aged_bloom(0, VENERABLE_SECS * 10);
+        young.progress = 0.2;
+        assert!(!young.is_venerable());
+    }
+
+    #[test]
+    fn venerable_plants_gift_seeds_on_an_interval() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.plots[0] = Some(aged_bloom(0, VENERABLE_SECS + GIFT_INTERVAL_SECS));
+        let before = g.seeds.len();
+        let gifts = g.collect_venerable_gifts(&mut rng);
+        assert_eq!(gifts.len(), 1, "one gift is due");
+        assert_eq!(g.seeds.len(), before + 1);
+        // 刚送完不会立刻再送
+        assert!(g.collect_venerable_gifts(&mut rng).is_empty());
+    }
+
+    #[test]
+    fn young_plants_never_gift_seeds() {
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        g.plots[0] = Some(bloom(0));
+        let before = g.seeds.len();
+        assert!(g.collect_venerable_gifts(&mut rng).is_empty());
+        assert_eq!(g.seeds.len(), before);
+    }
+
+    #[test]
+    fn venerable_plants_compost_for_more() {
+        let mut rng = rand::thread_rng();
+        let young = Garden::compost_value(&bloom(0), &mut rng);
+        let old = Garden::compost_value(&aged_bloom(0, VENERABLE_SECS * 2), &mut rng);
+        assert!(old > young, "venerable {old} should beat young {young}");
     }
 
     #[test]

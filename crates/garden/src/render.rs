@@ -238,9 +238,24 @@ impl Scene {
             if let Some(plant) = slot {
                 // 活力低 → 额外的固定"垂头"弯曲，视觉上就是蔫了（可逆，浇水即复原）
                 let droop = (1.0 - plant.vitality).max(0.0) * 1.6;
-                let wind = weather.wind() * gust(time, ax) * (0.5 + plant.vitality * 0.5) + droop;
+                // 古株木质化，风中晃得更少
+                let stiff = if plant.is_venerable() { 0.55 } else { 1.0 };
+                let wind =
+                    weather.wind() * gust(time, ax) * (0.5 + plant.vitality * 0.5) * stiff + droop;
                 if let Some(b) = self.draw_plant(canvas, plant, ax, ay, wind, time, dark0) {
                     blooms.push((b.0, b.1, b.2, b.3, b.4, plant.vitality));
+                }
+                // 古株的苔痕：茎基一圈青苔与虬结，越老越明显
+                if plant.is_venerable() {
+                    let moss = Rgb::new(78, 116, 62);
+                    for dx in -2..=2i32 {
+                        if (dx + ax) % 2 == 0 {
+                            canvas.set(ax + dx, ay - 1, moss);
+                        }
+                    }
+                    canvas.set(ax - 1, ay - 2, moss);
+                    canvas.set(ax + 1, ay - 3, Rgb::new(96, 132, 74));
+                    canvas.set(ax - 1, ay - 5, moss);
                 }
             }
             if i == selected || Some(i) == moving {
@@ -496,6 +511,8 @@ impl Scene {
                     progress: 1.0,
                     vitality: 1.0,
                     last_care: 0,
+                    planted_at: 0,
+                    last_gift: 0,
                 };
                 tmp.clear(MAGIC);
                 // 图鉴里天时科按"绽放的那一刻"展示（dark=1 → 月见花开着）

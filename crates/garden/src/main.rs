@@ -289,6 +289,12 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
+        // --- 古株馈赠：活得久的植株不定期白送种子 ---
+        let gifts = garden.collect_venerable_gifts(&mut rng);
+        if !gifts.is_empty() {
+            message = format!("古株结籽了：{}。", gifts.join("、"));
+        }
+
         // --- 委托：轮换 + 达成检查（脊椎）---
         for done in garden.update_quests(&mut rng) {
             message = done;
@@ -383,6 +389,8 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
                     progress: stages[i],
                     vitality: 1.0,
                     last_care: 0,
+                    planted_at: 0,
+                    last_gift: 0,
                 })
             })
             .collect();
@@ -598,14 +606,21 @@ fn draw_hud(
                     traits::Tier::Backdrop => String::new(),
                     other => format!("·{}", other.name()),
                 };
+                // 古株：活得久的会不定期白送种子，堆肥它就断了这份馈赠
+                let age = if p.is_venerable() {
+                    format!(" 古株{}h(每2h结籽)", p.age() / 3600)
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{}号地: [{}{}] {} {} {:.0}%{}{}{}",
+                    "{}号地: [{}{}] {} {} {:.0}%{}{}{}{}",
                     selected + 1,
                     fam,
                     tier,
                     display_name(&p.genes),
                     stage,
                     p.progress * 100.0,
+                    age,
                     rule,
                     vit,
                     pin_delta,
