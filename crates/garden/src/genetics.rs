@@ -20,8 +20,8 @@ pub struct Genes {
     pub glow: bool,
 }
 
-/// 品种总数：4 花卉 + 2 草蕨 + 2 异界 + 2 炼金 + 2 水生
-pub const VARIETIES: u8 = 12;
+/// 品种总数：4 花卉 + 2 草蕨 + 2 异界 + 2 炼金 + 2 水生 + 2 天时
+pub const VARIETIES: u8 = 14;
 
 /// 五大科系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +36,8 @@ pub enum Family {
     Alchemy,
     /// 水生：深海群系原生
     Aquatic,
+    /// 天时：开合绑定昼夜/天气，得赶上那一刻
+    Celestial,
 }
 
 pub fn family(variety: u8) -> Family {
@@ -44,7 +46,8 @@ pub fn family(variety: u8) -> Family {
         4 | 5 => Family::Herb,
         6 | 7 => Family::Eldritch,
         8 | 9 => Family::Alchemy,
-        _ => Family::Aquatic,
+        10 | 11 => Family::Aquatic,
+        _ => Family::Celestial,
     }
 }
 
@@ -61,7 +64,9 @@ pub fn variety_name(v: u8) -> &'static str {
         8 => "曼德拉",
         9 => "贤者金花",
         10 => "海葵",
-        _ => "珊瑚",
+        11 => "珊瑚",
+        12 => "月见花",
+        _ => "日晷花",
     }
 }
 
@@ -172,6 +177,8 @@ impl Genes {
             petal_shape = [0, 1, 2, 3, 4, 5][rng.gen_range(0..6)];
         } else if rng.gen_bool(0.025) {
             petal_shape = [6, 7, 8, 9][rng.gen_range(0..4)]; // 异界 / 炼金觉醒
+        } else if rng.gen_bool(0.02) {
+            petal_shape = [12, 13][rng.gen_range(0..2)]; // 天时科觉醒
         }
         if (a.petal_shape >= 10 || b.petal_shape >= 10) && rng.gen_bool(0.35) {
             petal_shape = 10 + rng.gen_range(0..2); // 水生血统强遗传

@@ -41,6 +41,7 @@ impl Requirement {
                     Family::Eldritch => "异界",
                     Family::Alchemy => "炼金",
                     Family::Aquatic => "水生",
+                    Family::Celestial => "天时",
                 }
             ),
             Requirement::Glowing => "会发光".to_string(),
@@ -141,8 +142,8 @@ pub fn weekly_quests(week: u64, count: usize) -> Vec<Quest> {
                 ("植物学者的订单", v)
             }
             _ => {
-                // 传说：稀有科系 + 发光
-                let v = [6u8, 7, 8, 9][rng.gen_range(0..4)];
+                // 传说：碰轴的稀有品种 + 发光（异界/炼金/天时）
+                let v = [6u8, 7, 8, 9, 12, 13][rng.gen_range(0..6)];
                 reqs.push(Requirement::Variety(v));
                 reqs.push(Requirement::Glowing);
                 ("收藏家的执念", v)

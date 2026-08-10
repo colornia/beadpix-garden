@@ -168,8 +168,23 @@ pub fn traits_of(variety: u8) -> PlantTraits {
             ..Default::default()
         },
         // 10 海葵 / 11 珊瑚：群系锁定（轴1）
-        _ => PlantTraits {
+        10 | 11 => PlantTraits {
             spawn_cond: Some(SpawnCond::BiomeLocked),
+            ..Default::default()
+        },
+        // 12 月见花：只在夜里绽放（轴1）+ 按时开合（轴2）+ 突变觉醒（轴4）→ 传说级。
+        // 白天回来只看得到闭合的花苞——想看它开，你得夜里来。
+        12 => PlantTraits {
+            spawn_cond: Some(SpawnCond::NightOnly),
+            behavior: vec![Behavior::ClockOpen],
+            genetic: Some(GeneticTag::MutationOnly),
+            ..Default::default()
+        },
+        // 13 日晷花：向日 + 按时开合（轴2）+ 夜间滋养邻株（轴3）+ 突变觉醒（轴4）
+        _ => PlantTraits {
+            behavior: vec![Behavior::Heliotropic, Behavior::ClockOpen],
+            neighbor: Some(NeighborEffect::Nourish),
+            genetic: Some(GeneticTag::MutationOnly),
             ..Default::default()
         },
     }

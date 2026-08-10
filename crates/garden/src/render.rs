@@ -199,6 +199,8 @@ impl Scene {
         }
 
         // --- 植株（按锚点顺序绘制：后排先画，前排自然遮挡）---
+        // 天时科（月见花/日晷花）的开合绑定这个值
+        let dark0 = weather.darkness();
         let pts = anchors(biome, w, h, seed, garden.plots.len());
         // (x, y, 主色, 发光基因, 品种, vitality)
         let mut blooms: Vec<(i32, i32, Rgb, bool, u8, f32)> = Vec::new();
@@ -237,7 +239,7 @@ impl Scene {
                 // 活力低 → 额外的固定"垂头"弯曲，视觉上就是蔫了（可逆，浇水即复原）
                 let droop = (1.0 - plant.vitality).max(0.0) * 1.6;
                 let wind = weather.wind() * gust(time, ax) * (0.5 + plant.vitality * 0.5) + droop;
-                if let Some(b) = self.draw_plant(canvas, plant, ax, ay, wind, time) {
+                if let Some(b) = self.draw_plant(canvas, plant, ax, ay, wind, time, dark0) {
                     blooms.push((b.0, b.1, b.2, b.3, b.4, plant.vitality));
                 }
             }
@@ -396,13 +398,13 @@ impl Scene {
                 c.g as f32 / 255.0 * v,
                 c.b as f32 / 255.0 * v,
             );
-            // 异界/炼金/水生品种自带微光（贤者金花昼夜常亮）
-            let intrinsic = matches!(variety, 6 | 7 | 10 | 11);
+            // 异界/水生/月见花自带微光（贤者金花与日晷花另有常亮规则）
+            let intrinsic = matches!(variety, 6 | 7 | 10 | 11 | 12);
             if glows {
                 let s = 0.55 + dark * 0.55 + pulse;
                 let r = 9 + (dark * 4.0) as i32;
                 lights.push((x, y, r, (nr * s, ng * s, nb * s)));
-            } else if variety == 9 {
+            } else if variety == 9 || variety == 13 {
                 let s = 0.35 + dark * 0.45 + pulse * 0.5;
                 lights.push((x, y, 7, (0.95 * s, 0.8 * s, 0.45 * s)));
             } else if intrinsic && dark > 0.25 {
@@ -496,6 +498,7 @@ impl Scene {
                     last_care: 0,
                 };
                 tmp.clear(MAGIC);
+                // 图鉴里天时科按"绽放的那一刻"展示（dark=1 → 月见花开着）
                 self.draw_plant(
                     &mut tmp,
                     &mini,
@@ -503,6 +506,7 @@ impl Scene {
                     cell_h as i32 - 2,
                     0.0,
                     time,
+                    1.0,
                 );
 
                 // 已收集：脚下微光基座（先画，植株盖在上面）
@@ -1051,6 +1055,7 @@ impl Scene {
         ground_y: i32,
         wind: f32,
         time: f32,
+        dark: f32,
     ) -> Option<(i32, i32, Rgb, bool, u8)> {
         use crate::genetics::VARIETIES;
         let genes = &plant.genes;
@@ -1064,6 +1069,8 @@ impl Scene {
         // 生长比例 0..1（发芽到成熟）
         let gp = ((plant.progress - 0.15) / 0.85).clamp(0.0, 1.0);
         match genes.petal_shape % VARIETIES {
+            12 => self.draw_moonflower(canvas, plant, px, ground_y, wind, time, gp, dark),
+            13 => self.draw_sundial(canvas, plant, px, ground_y, wind, time, gp, dark),
             4 => self.draw_grass(canvas, plant, px, ground_y, wind, gp),
             5 => self.draw_fern(canvas, plant, px, ground_y, wind, gp),
             6 => self.draw_eyeflower(canvas, plant, px, ground_y, wind, time, gp),
@@ -1527,6 +1534,137 @@ impl Scene {
         } else {
             None
         }
+    }
+
+    /// 月见花（12）：白天是闭合的纺锤形花苞，入夜绽放成银白色的星形花，
+    /// 花瓣随黑暗度连续张开——想看它开，你得夜里来。
+    fn draw_moonflower(
+        &self,
+        canvas: &mut Canvas,
+        plant: &Plant,
+        px: i32,
+        ground_y: i32,
+        wind: f32,
+        time: f32,
+        gp: f32,
+        dark: f32,
+    ) -> Option<(i32, i32, Rgb, bool, u8)> {
+        let genes = &plant.genes;
+        let full_h = genes.height as f32;
+        let cur_h = (full_h * gp) as i32;
+        let stage = plant.stage();
+        // 张开度：夜色越深开得越大（0.35 以下完全闭合）
+        let open = ((dark - 0.35) / 0.5).clamp(0.0, 1.0);
+
+        for i in 0..cur_h {
+            let o = wind * 1.5 * (i as f32 / full_h).powf(1.6);
+            canvas.set(px + o.round() as i32, ground_y - i, Rgb::new(74, 118, 92));
+        }
+        let tx = px + (wind * 1.2).round() as i32;
+        let ty = ground_y - cur_h;
+        // 细长的叶片
+        if cur_h > 5 {
+            let ly = ground_y - cur_h / 2;
+            for d in 1..=3 {
+                canvas.set(px - d, ly + d / 2, Rgb::new(66, 108, 84));
+                canvas.set(px + d, ly - 1 + d / 2, Rgb::new(58, 96, 76));
+            }
+        }
+        if stage != Stage::Bloom {
+            return None;
+        }
+
+        let pale = Rgb::from_hsv(genes.hue, genes.saturation * 0.35, 0.97);
+        let deep = Rgb::from_hsv(genes.hue, genes.saturation * 0.6, 0.66);
+        if open < 0.05 {
+            // 白天：闭合的纺锤花苞
+            for d in -2..=2i32 {
+                let w = if d.abs() >= 2 { 0 } else { 1 };
+                for dx in -w..=w {
+                    canvas.set(tx + dx, ty + d, deep);
+                }
+            }
+            canvas.set(tx, ty - 3, deep.tint(1.15, 1.15, 1.15));
+            return Some((tx, ty, deep, genes.glow, 12));
+        }
+        // 夜里：六瓣星形，花瓣长度随张开度伸展
+        let petal_len = 1.0 + open * 3.2;
+        for k in 0..6 {
+            let ang = k as f32 * std::f32::consts::TAU / 6.0 + time * 0.12;
+            for i in 1..=petal_len as i32 {
+                let t = i as f32 / petal_len;
+                let x = tx + (ang.cos() * i as f32).round() as i32;
+                let y = ty + (ang.sin() * i as f32 * 0.8).round() as i32;
+                canvas.set(x, y, deep.lerp(pale, t));
+            }
+        }
+        canvas.fill_circle(tx, ty, 1, Rgb::new(252, 246, 205));
+        Some((tx, ty, pale, genes.glow, 12))
+    }
+
+    /// 日晷花（13）：花盘追着太阳/月亮转（向日性），
+    /// 盘面刻着放射状纹路，正午开到最大、夜里半合。
+    fn draw_sundial(
+        &self,
+        canvas: &mut Canvas,
+        plant: &Plant,
+        px: i32,
+        ground_y: i32,
+        wind: f32,
+        time: f32,
+        gp: f32,
+        dark: f32,
+    ) -> Option<(i32, i32, Rgb, bool, u8)> {
+        let genes = &plant.genes;
+        let full_h = genes.height as f32;
+        let cur_h = (full_h * gp) as i32;
+        let stage = plant.stage();
+
+        for i in 0..cur_h {
+            let o = wind * 1.4 * (i as f32 / full_h).powf(1.6);
+            let x = px + o.round() as i32;
+            canvas.set(x, ground_y - i, Rgb::new(92, 132, 58));
+            if i < cur_h / 2 {
+                canvas.set(x + 1, ground_y - i, Rgb::new(74, 108, 48));
+            }
+        }
+        let tx = px + (wind * 1.1).round() as i32;
+        let ty = ground_y - cur_h;
+        if cur_h > 5 {
+            let ly = ground_y - cur_h / 2;
+            for d in 1..=3 {
+                canvas.set(px - d, ly, Rgb::new(84, 142, 62));
+                canvas.set(px + d, ly + 1, Rgb::new(70, 124, 54));
+            }
+        }
+        if stage != Stage::Bloom {
+            return None;
+        }
+
+        // 向日：花盘朝向天体（白天偏太阳、夜里偏月亮），用倾斜偏移表达
+        let lean = if dark < 0.5 { -1 } else { 1 };
+        let cx = tx + lean;
+        let petal = Rgb::from_hsv(genes.hue, genes.saturation, 0.86);
+        let petal_hi = Rgb::from_hsv(genes.hue, genes.saturation * 0.5, 1.0);
+        // 夜里半合
+        let spread = if dark > 0.6 { 2 } else { 3 };
+        for k in 0..12 {
+            let ang = k as f32 * std::f32::consts::TAU / 12.0;
+            for i in 2..=spread {
+                let x = cx + (ang.cos() * i as f32).round() as i32;
+                let y = ty + (ang.sin() * i as f32 * 0.85).round() as i32;
+                canvas.set(x, y, if k % 2 == 0 { petal } else { petal_hi });
+            }
+        }
+        // 盘心 + 时针状指针（缓慢转动，像日晷）
+        canvas.fill_circle(cx, ty, 1, Rgb::new(96, 70, 40));
+        let hand = time * 0.25;
+        canvas.set(
+            cx + (hand.cos() * 2.0).round() as i32,
+            ty + (hand.sin() * 1.6).round() as i32,
+            Rgb::new(250, 234, 168),
+        );
+        Some((cx, ty, petal, genes.glow, 13))
     }
 
     /// 珊瑚枝（11）：分叉的枝干，末端缀着发光的珊瑚虫。

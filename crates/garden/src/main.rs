@@ -21,8 +21,8 @@ use weather::Weather;
 const FPS: u64 = 30;
 /// 画面下方保留的文字行数（HUD）
 const HUD_ROWS: u16 = 2;
-/// 图鉴总品种数：8 色系 x 12 品种（五大科系）
-const TOTAL_SPECIES: usize = 96;
+/// 图鉴总品种数：8 色系 x 14 品种（六大科系）
+const TOTAL_SPECIES: usize = 112;
 
 fn save_path() -> PathBuf {
     std::env::current_dir()
@@ -351,7 +351,7 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
 
     std::fs::create_dir_all(dir)?;
     // (群系, 标签, 时刻, 彩虹秒数, 八个地块的品种)
-    let shots: [(Biome, &str, f32, f32, [u8; 8]); 8] = [
+    let shots: [(Biome, &str, f32, f32, [u8; 8]); 10] = [
         (Biome::Meadow, "meadow_noon", 0.28, 0.0, [0, 4, 1, 3, 2, 4, 3, 0]),
         (Biome::Meadow, "meadow_rainbow", 0.3, 25.0, [0, 4, 1, 3, 2, 4, 3, 0]),
         (Biome::Meadow, "meadow_night", 0.72, 0.0, [0, 4, 1, 3, 2, 4, 3, 0]),
@@ -362,6 +362,9 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
         // 深海群系（海葵、珊瑚）
         (Biome::Abyss, "abyss_noon", 0.3, 0.0, [10, 11, 10, 11, 10, 11, 10, 11]),
         (Biome::Abyss, "abyss_night", 0.72, 0.0, [10, 11, 10, 11, 10, 11, 10, 11]),
+        // 天时科：同样两株，白天闭合 / 夜里绽放
+        (Biome::Meadow, "celestial_noon", 0.3, 0.0, [12, 13, 12, 13, 12, 13, 12, 13]),
+        (Biome::Meadow, "celestial_night", 0.72, 0.0, [12, 13, 12, 13, 12, 13, 12, 13]),
     ];
     for (biome, tag, clock, rainbow, shapes) in shots {
         let stages = [1.0, 0.3, 0.6, 1.0, 1.0, 1.0, 1.0, 0.9];
@@ -562,6 +565,7 @@ fn draw_hud(
                     Family::Eldritch => "异界",
                     Family::Alchemy => "炼金",
                     Family::Aquatic => "水生",
+                    Family::Celestial => "天时",
                 };
                 // 钉了目标表型时显示与目标的差距（定向育种导航）
                 let pin_delta = garden
