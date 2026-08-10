@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::KeyCode;
 
-use beadpix::{Canvas, HalfBlockRenderer, TerminalSession};
+use beadpix::{Canvas, HalfBlockRenderer, Input, MouseKind, TerminalSession};
 use garden::{Garden, Stage};
 use genetics::{display_name, family, predict_child, species_name, Family};
 use render::Scene;
@@ -29,6 +29,19 @@ fn save_path() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_default()
         .join("garden_save.json")
+}
+
+/// 这块地此刻"最自然的那个动作"——再点一次已选中的地块就执行它。
+///
+/// 这是上下文动作条的雏形：新玩家不必背 11 个热键，点两下就能推进；
+/// 老玩家的热键一个没动。返回热键本身，让鼠标和键盘走同一条代码路径。
+fn primary_action_key(garden: &Garden, plot: usize) -> KeyCode {
+    match &garden.plots[plot] {
+        None => KeyCode::Enter,                       // 空地 → 播种
+        Some(p) if p.vitality < 0.6 => KeyCode::Char('w'), // 蔫了 → 先浇水
+        Some(p) if p.stage() == Stage::Bloom => KeyCode::Char('h'), // 开花 → 收获
+        Some(_) => KeyCode::Char('w'),                // 还在长 → 浇水（唯一有意义的照料）
+    }
 }
 
 /// 按终端显示宽度（CJK 算 2 格）截断并补空格到 width。
@@ -68,6 +81,8 @@ fn main() -> std::io::Result<()> {
     let canvas_h = ((rows.saturating_sub(HUD_ROWS)) as u32 * 2).clamp(40, 160);
 
     let mut session = TerminalSession::begin()?;
+    // 鼠标是与键盘并行的可发现层；Drop 保证崩了也不会把终端卡在鼠标模式
+    session.enable_mouse()?;
     let mut canvas = Canvas::new(canvas_w, canvas_h);
     let mut renderer = HalfBlockRenderer::new(canvas_w, canvas_h);
     let mut scene = Scene::new();
@@ -83,6 +98,8 @@ fn main() -> std::io::Result<()> {
     let mut moving: Option<usize> = None;
     // 布景模式：Some(装饰槽位)——←→ 换槽位，回车摆放/收回
     let mut decor_cursor: Option<usize> = None;
+    // 鼠标当前悬停到的目标（去抖用：只在变化时才更新 HUD）
+    let mut hover: Option<render::PickTarget> = None;
     // 花头位置：锚点上方株高处（蜜蜂和迸发粒子的目标点）
     let head_of = |garden: &Garden, i: usize| -> Option<(f32, f32)> {
         let pts = render::anchors(
@@ -112,7 +129,57 @@ fn main() -> std::io::Result<()> {
 
     loop {
         // --- 输入 ---
-        let key = TerminalSession::poll_key(Duration::from_millis(1))?;
+        // 鼠标与键盘并行：鼠标先翻译成"点到了什么"，再和热键走同一套动作
+        let input = TerminalSession::poll_input(Duration::from_millis(1))?;
+        let mut key = match input {
+            Some(Input::Key(k)) => Some(k),
+            _ => None,
+        };
+        if let Some(Input::Mouse(m)) = input {
+            let target = scene.pick_at(m.col, m.row);
+            match (m.kind, target) {
+                // 点地块：先选中；点已选中的地块 = 执行它此刻最自然的动作
+                (MouseKind::LeftDown, Some(render::PickTarget::Bed(i))) => {
+                    if gallery.is_none() && decor_cursor.is_none() {
+                        if selected == i {
+                            key = Some(primary_action_key(&garden, i));
+                        } else {
+                            selected = i;
+                        }
+                    }
+                }
+                // 点布景槽位：进布景模式并选中它
+                (MouseKind::LeftDown, Some(render::PickTarget::DecorSlot(s))) => {
+                    if gallery.is_none() {
+                        decor_cursor = Some(s);
+                        message = String::from("布景模式：[回车]摆放 [退格]收起 [D]退出");
+                    }
+                }
+                // 图鉴里点格子直接查看
+                (MouseKind::LeftDown, Some(render::PickTarget::DexCell(c, r))) => {
+                    if gallery.is_some() {
+                        gallery = Some((c, r));
+                    }
+                }
+                // 悬停：去抖——只在指到的东西变了时才更新
+                (MouseKind::Moved, t) => {
+                    if t != hover {
+                        hover = t;
+                    }
+                }
+                (MouseKind::ScrollUp, _) => {
+                    if let Some((c, r)) = gallery {
+                        gallery = Some((c, (r + 7) % 8));
+                    }
+                }
+                (MouseKind::ScrollDown, _) => {
+                    if let Some((c, r)) = gallery {
+                        gallery = Some((c, (r + 1) % 8));
+                    }
+                }
+                _ => {}
+            }
+        }
         // 图鉴页打开时：方向键移动查看光标，B/Esc 关闭
         if let Some((gc, gr)) = gallery {
             let ncols = genetics::VARIETIES as usize;
@@ -385,6 +452,7 @@ fn main() -> std::io::Result<()> {
                 fast,
                 hud_mode,
                 decor_cursor,
+                hover,
             )?;
         }
 
@@ -639,7 +707,30 @@ fn draw_hud(
     fast: bool,
     hud_mode: u8,
     decor_cursor: Option<usize>,
+    hover: Option<render::PickTarget>,
 ) -> std::io::Result<()> {
+    // 悬停优先：鼠标划到哪就读哪一株，不用先点选
+    if let Some(render::PickTarget::Bed(h)) = hover {
+        if h != selected {
+            let expand_hint = match garden.expand_cost() {
+                Some(c) => format!("{}", c),
+                None => String::from("满"),
+            };
+            return draw_hud_lines(
+                session,
+                hud_row,
+                cols,
+                garden,
+                weather,
+                message,
+                fast,
+                hud_mode,
+                decor_cursor,
+                format!("👁 {}", describe_bed(garden, h)),
+                expand_hint,
+            );
+        }
+    }
     // 杂交预览优先：当前块与右侧块都盛开时，显示子代预测范围
     let preview = garden.plots.get(selected).and_then(|s| s.as_ref()).and_then(|a| {
         garden
@@ -671,8 +762,23 @@ fn draw_hud(
             aff
         )
     } else {
-        match &garden.plots[selected] {
-            Some(p) => {
+        describe_bed(garden, selected)
+    };
+    let expand_hint = match garden.expand_cost() {
+        Some(c) => format!("{}", c),
+        None => String::from("满"),
+    };
+    draw_hud_lines(
+        session, hud_row, cols, garden, weather, message, fast, hud_mode, decor_cursor, info,
+        expand_hint,
+    )
+}
+
+/// 一块地的完整描述。选中和**鼠标悬停**共用它——
+/// 悬停即可读出这一株是什么、碰了哪条轴、为什么还没发芽。
+fn describe_bed(garden: &Garden, idx: usize) -> String {
+    match garden.plots.get(idx).and_then(|s| s.as_ref()) {
+        Some(p) => {
                 let stage = match p.stage() {
                     Stage::Seed => "种子",
                     Stage::Sprout => "幼苗",
@@ -739,7 +845,7 @@ fn draw_hud(
                 };
                 format!(
                     "{}号地: [{}{}] {} {} {:.0}%{}{}{}{}{}",
-                    selected + 1,
+                    idx + 1,
                     fam,
                     tier,
                     display_name(&p.genes),
@@ -751,14 +857,25 @@ fn draw_hud(
                     vit,
                     pin_delta,
                 )
-            }
-            None => format!("{}号地: 空", selected + 1),
         }
-    };
-    let expand_hint = match garden.expand_cost() {
-        Some(c) => format!("{}", c),
-        None => String::from("满"),
-    };
+        None => format!("{}号地: 空", idx + 1),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_hud_lines(
+    session: &mut TerminalSession,
+    hud_row: u32,
+    cols: u16,
+    garden: &Garden,
+    weather: &Weather,
+    message: &str,
+    fast: bool,
+    hud_mode: u8,
+    decor_cursor: Option<usize>,
+    info: String,
+    expand_hint: String,
+) -> std::io::Result<()> {
     let line1 = if let Some(slot) = decor_cursor {
         // 布景面板
         let here = garden.decor.get(slot).and_then(|d| *d);
@@ -820,7 +937,7 @@ fn draw_hud(
         format!(" [←→]选位置 [回车]摆放 [退格]收起 [D]退出布景 | {}", message)
     } else {
         format!(
-            " [←→↑↓]选 [回车]种 [W]浇 [H]收 [X]杂交 [M]移植 [P]钉 [C]堆肥 [E]扩张 [D]布景 [Q]委托 [B]图鉴 [Esc]退出 | {}",
+            " 🖱点选/再点执行·悬停查看 | [回车]种 [W]浇 [H]收 [X]杂交 [M]移植 [P]钉 [C]堆肥 [E]扩张 [D]布景 [Q]委托 [B]图鉴 [Esc]退出 | {}",
             message
         )
     };

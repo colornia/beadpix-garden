@@ -6,6 +6,7 @@
 pub mod canvas;
 pub mod color;
 pub mod hybrid;
+pub mod pick;
 pub mod renderer;
 pub mod sprite;
 pub mod terminal;
@@ -13,6 +14,7 @@ pub mod terminal;
 pub use canvas::Canvas;
 pub use color::Rgb;
 pub use hybrid::HybridRenderer;
+pub use pick::PickBuffer;
 pub use renderer::HalfBlockRenderer;
 pub use sprite::{Palette, Sprite};
-pub use terminal::TerminalSession;
+pub use terminal::{Input, Mouse, MouseKind, TerminalSession};

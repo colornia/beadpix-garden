@@ -1,4 +1,4 @@
-use beadpix::{Canvas, Palette, Rgb, Sprite};
+use beadpix::{Canvas, Palette, PickBuffer, Rgb, Sprite};
 
 use crate::decor::{decor_anchors, Decoration};
 use crate::garden::{Biome, Garden, Plant, Stage};
@@ -16,6 +16,18 @@ pub fn ground_frac(biome: Biome) -> f32 {
 
 /// 光源：位置、半径、RGB 光强（叠加到环境光之上）。
 type LightSource = (i32, i32, i32, (f32, f32, f32));
+
+/// 鼠标能点到的东西。渲染时顺手涂进命中缓冲，
+/// 绘制顺序（后排先画、前排后画）天然给出正确的遮挡优先级。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickTarget {
+    /// 地块（含其中的植株）
+    Bed(usize),
+    /// 布景槽位
+    DecorSlot(usize),
+    /// 图鉴格：(列, 行)
+    DexCell(usize, usize),
+}
 
 /// 阵风波形：多层不同频率正弦叠加，相位随 x 偏移，风"扫过"花园。
 fn gust(time: f32, x: i32) -> f32 {
@@ -138,6 +150,8 @@ pub struct Scene {
     bees: Vec<(f32, (f32, f32), (f32, f32))>,
     /// 深海气泡 (x, y, 相位)
     bubbles: Vec<(f32, f32, f32)>,
+    /// 命中缓冲：鼠标交互的地基，每帧随绘制一起重建
+    pick: PickBuffer<PickTarget>,
 }
 
 impl Scene {
@@ -149,7 +163,13 @@ impl Scene {
             bursts: Vec::new(),
             bees: Vec::new(),
             bubbles: Vec::new(),
+            pick: PickBuffer::new(1, 2),
         }
+    }
+
+    /// 按字符格坐标查询鼠标指到了什么（直接喂终端鼠标事件的 column/row）。
+    pub fn pick_at(&self, col: u16, row: u16) -> Option<PickTarget> {
+        self.pick.at(col, row)
     }
 
     /// 收获时的花瓣迸发：以花头为中心向四周炸开一圈花色粒子。
@@ -189,6 +209,11 @@ impl Scene {
         let h = canvas.height();
         let biome = garden.biome;
         let seed = garden.world_seed;
+        // 命中缓冲随画布尺寸重建，每帧清空后跟着绘制顺序重新涂
+        if self.pick.cols() != w || self.pick.rows() != h / 2 {
+            self.pick = PickBuffer::new(w, h);
+        }
+        self.pick.clear();
         let main_ground = (h as f32 * ground_frac(biome)) as i32;
         let mut lights: Vec<LightSource> = Vec::new();
 
@@ -207,11 +232,15 @@ impl Scene {
 
         // --- 布景：先于植株绘制，前排植株自然盖住它们 ---
         let dpts = decor_anchors(biome, w, h, seed);
-        for (i, d) in garden.decor.iter().enumerate() {
-            let Some(d) = d else { continue };
-            let (dx, dy) = dpts[i.min(dpts.len() - 1)];
+        for (i, &(dx, dy)) in dpts.iter().enumerate() {
+            // 空槽位也要能点中（不然摆不上第一件），热区比装饰本体略大
+            self.pick
+                .paint_around(dx, dy - 3, 5, 5, PickTarget::DecorSlot(i));
+            let Some(d) = garden.decor.get(i).and_then(|d| *d) else {
+                continue;
+            };
             let dwind = weather.wind() * gust(time, dx);
-            self.draw_decor(canvas, *d, dx, dy, time, dwind, dark0, &mut lights);
+            self.draw_decor(canvas, d, dx, dy, time, dwind, dark0, &mut lights);
         }
         // 布景模式下高亮当前槽位
         if let Some(sel) = decor_cursor {
@@ -230,6 +259,13 @@ impl Scene {
         let mut blooms: Vec<(i32, i32, Rgb, bool, u8, f32)> = Vec::new();
         for (i, slot) in garden.plots.iter().enumerate() {
             let (ax, ay) = pts[i];
+            // 地块热区：地面一块 + 植株所占的高度（细茎也点得中）。
+            // 后排先画、前排后画，重叠处自动归前排——正是玩家的预期
+            let plant_h = slot.as_ref().map_or(0, |p| {
+                (p.genes.height as f32 * ((p.progress - 0.15) / 0.85).clamp(0.0, 1.0)) as i32
+            });
+            self.pick
+                .paint_rect(ax - 5, ay - plant_h - 4, 11, plant_h + 8, PickTarget::Bed(i));
             match biome {
                 Biome::Crevice => {
                     for dx in -4..=4 {
@@ -563,6 +599,12 @@ impl Scene {
         const MAGIC: Rgb = Rgb::new(255, 0, 255);
         let mut tmp = Canvas::new(cell_w, cell_h);
 
+        // 图鉴页也有自己的命中缓冲——鼠标能直接点格子查看
+        if self.pick.cols() != w || self.pick.rows() != h / 2 {
+            self.pick = PickBuffer::new(w, h);
+        }
+        self.pick.clear();
+
         for (col, &(variety, tier)) in cols.iter().enumerate() {
             let x0 = (col as u32 * w / n) as i32;
             let x1 = ((col as u32 + 1) * w / n) as i32;
@@ -585,6 +627,13 @@ impl Scene {
 
             for (row, &hue) in HUES.iter().enumerate() {
                 let y0 = band_h + (row as u32 * grid_h as u32 / 8) as i32;
+                self.pick.paint_rect(
+                    x0,
+                    y0,
+                    x1 - x0,
+                    grid_h / 8,
+                    PickTarget::DexCell(col, row),
+                );
                 let species = format!("{}{}", hue_name(hue), variety_name(variety));
                 let found = garden.discovered.iter().any(|s| s == &species);
 

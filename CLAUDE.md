@@ -21,6 +21,17 @@
   `cargo test -p garden --target-dir <scratchpad>/build`。其中两项守护 cozy 契约：
   植物永不死亡、每天来一次的玩家看不到蔫——**这两条测试不许改成通过为止**
 
+## 鼠标交互（P1 地基，已落地第一步）
+
+- `beadpix/pick.rs` 的 `PickBuffer<T>`：与像素画布并行的字符格命中表。
+  **涂写用像素坐标、查询用字符格坐标**（半块下 1 格 = 纵向 2 像素，内部换算）。
+  依赖画家顺序天然获得正确遮挡优先级——后画的盖先画的，不需要 z 排序
+- `Scene::draw` 每帧重建它；`Scene::pick_at(col,row)` 直接喂终端鼠标事件坐标
+- `TerminalSession::enable_mouse()` + Drop 自动关闭（**绝不能让崩溃把终端卡在鼠标模式**）
+- `poll_input()` 返回 `Input::{Key,Mouse}`；鼠标翻译成动作后走**和热键同一条代码路径**
+  （见 `primary_action_key`），所以两种输入永远不会行为分叉
+- 键盘全部保留。鼠标是并行的可发现层，不是替代
+
 ## 关键约定
 
 - 编译验证用独立目标目录（用户常开着游戏，`target/release/garden.exe` 会被锁）：
