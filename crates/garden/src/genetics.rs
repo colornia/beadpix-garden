@@ -64,6 +64,20 @@ impl Family {
     }
 }
 
+/// 各科系里"只能靠突变觉醒"的品种。**陨星花(15) 不在任何池子里**——
+/// 它只能由流星带来。花卉/草蕨/水生没有稀有成员（它们是野生池的常客）。
+pub fn rare_pool_of(f: Family) -> &'static [u8] {
+    match f {
+        Family::Eldritch => &[6, 7],
+        Family::Alchemy => &[8, 9],
+        Family::Celestial => &[12, 13, 14, 16],
+        _ => &[],
+    }
+}
+
+/// 全部可觉醒品种（无专注时的池子）。
+pub const ALL_RARE: [u8; 8] = [6, 7, 8, 9, 12, 13, 14, 16];
+
 /// 血统亲和：**专注**培育一个科系，该科的稀有品种就更容易觉醒。
 ///
 /// 这把"稀有科系纯看运气"变成了可经营的策略：想补全异界科的空格，
@@ -188,8 +202,19 @@ pub struct ChildForecast {
     pub affinity_level: u32,
 }
 
+/// 这次配种的稀有觉醒概率。**预览与真实杂交都只从这里取值**，
+/// 两边不可能算出不一样的数——预览骗人比没有预览更糟。
+pub fn rare_chance_of(a: &Genes, b: &Genes, aff: &Affinity) -> f64 {
+    let fa = family(a.petal_shape);
+    if fa == family(b.petal_shape) {
+        aff.rare_chance(fa)
+    } else {
+        0.025
+    }
+}
+
 /// 同科配种时显示的是**受血统亲和加成后**的觉醒率，
-/// 与 `Genes::cross_with` 用的是同一个 `Affinity::rare_chance`。
+/// 与 `Genes::cross_with` 用的是同一个 `rare_chance_of`。
 pub fn predict_child(a: &Genes, b: &Genes, aff: &Affinity) -> ChildForecast {
     let dh = ((b.hue - a.hue + 540.0) % 360.0) - 180.0;
     let fa = family(a.petal_shape);
@@ -206,12 +231,8 @@ pub fn predict_child(a: &Genes, b: &Genes, aff: &Affinity) -> ChildForecast {
         } else {
             0.02
         },
-        // 同科配种走"该科亲和"，异科配种没有专注加成
-        rare_chance: if same_family {
-            aff.rare_chance(fa) as f32
-        } else {
-            0.025
-        },
+        // 与真实杂交同源
+        rare_chance: rare_chance_of(a, b, aff) as f32,
         affinity_family: if same_family { Some(fa) } else { None },
         affinity_level: if same_family { aff.level(fa) } else { 0 },
     }
@@ -281,29 +302,26 @@ impl Genes {
         if rng.gen_bool(0.05) {
             saturation = rng.gen_range(0.5..1.0);
         }
-        // 品种突变：普通池常见，稀有科系走"该科亲和"加成的概率。
-        // 同科配种才吃加成——专注培育一个科系，它的空格才补得快
+        // 品种突变：普通池常见；稀有觉醒的概率与去向都吃"该科亲和"。
         let fa = family(a.petal_shape);
         let same_family = fa == family(b.petal_shape);
-        let boosted = |f: Family| -> f64 {
-            if same_family && fa == f {
-                aff.rare_chance(f)
-            } else {
-                0.025
-            }
-        };
         if rng.gen_bool(0.06) {
             petal_shape = [0, 1, 2, 3, 4, 5][rng.gen_range(0..6)];
-        } else if rng.gen_bool(boosted(Family::Eldritch).max(boosted(Family::Alchemy))) {
-            // 异界 / 炼金觉醒：专注哪一科，就更容易出那一科
-            petal_shape = match (same_family, fa) {
-                (true, Family::Eldritch) => [6, 7][rng.gen_range(0..2)],
-                (true, Family::Alchemy) => [8, 9][rng.gen_range(0..2)],
-                _ => [6, 7, 8, 9][rng.gen_range(0..4)],
+        } else if rng.gen_bool(rare_chance_of(a, b, aff)) {
+            // 同科配种时只从该科里挑，且**排除父母已有的品种**——
+            // 觉醒必须给出新东西，否则"我有眼球花想要触手藤"这个诉求
+            // 就永远等不到（突变把已有的又给一遍等于没突变）
+            let focused: Vec<u8> = if same_family {
+                rare_pool_of(fa)
+                    .iter()
+                    .copied()
+                    .filter(|v| *v != a.petal_shape && *v != b.petal_shape)
+                    .collect()
+            } else {
+                Vec::new()
             };
-        } else if rng.gen_bool(boosted(Family::Celestial).min(0.12)) {
-            // 天时科觉醒。**陨星花(15) 不在此列**——它只能由流星带来
-            petal_shape = [12, 13, 14, 16][rng.gen_range(0..4)];
+            let pool: &[u8] = if focused.is_empty() { &ALL_RARE } else { &focused };
+            petal_shape = pool[rng.gen_range(0..pool.len())];
         }
         if (a.petal_shape >= 10 || b.petal_shape >= 10) && rng.gen_bool(0.35) {
             petal_shape = 10 + rng.gen_range(0..2); // 水生血统强遗传

@@ -1117,12 +1117,15 @@ mod tests {
 
     /// 纪律：遗传预览与真实杂交必须同源。亲和拉高预览里的觉醒率时，
     /// 真实杂交的产出率也必须跟着涨，否则预览就是在骗人。
+    ///
+    /// 测的是"我有眼球花，想要触手藤"这个真实诉求：两株同为眼球花(6)，
+    /// 普通遗传只会给 6，所以出现 7 必定来自觉醒——效应不会被遗传噪声淹没。
     #[test]
     fn affinity_raises_both_the_forecast_and_the_real_odds() {
-        use crate::genetics::{family, predict_child, Affinity, Family};
+        use crate::genetics::{predict_child, Affinity, Family};
         let mut rng = rand::thread_rng();
-        let a = bloom(6).genes; // 异界
-        let b = bloom(7).genes; // 异界
+        let a = bloom(6).genes;
+        let b = bloom(6).genes;
 
         let none = Affinity::default();
         let mut maxed = Affinity::default();
@@ -1136,20 +1139,43 @@ mod tests {
         assert_eq!(f0.affinity_family, Some(Family::Eldritch));
         assert!(f1.rare_chance > f0.rare_chance * 3.0);
 
-        // 实际：满亲和时真的更常出异界科
+        // 实际：满亲和时真的更常觉醒出触手藤
         let count = |aff: &Affinity, rng: &mut rand::rngs::ThreadRng| {
-            (0..4000)
-                .filter(|_| {
-                    let c = Genes::cross_with(&a, &b, aff, rng);
-                    family(c.petal_shape) == Family::Eldritch && c.petal_shape != a.petal_shape
-                })
+            (0..6000)
+                .filter(|_| Genes::cross_with(&a, &b, aff, rng).petal_shape == 7)
                 .count()
         };
         let lo = count(&none, &mut rng);
         let hi = count(&maxed, &mut rng);
         assert!(
-            hi > lo,
-            "maxed affinity should yield more eldritch awakenings ({hi} vs {lo})"
+            hi > lo * 2,
+            "maxed affinity should clearly out-produce none ({hi} vs {lo})"
+        );
+    }
+
+    /// 觉醒必须给出**新**品种，否则专注育种等于原地打转。
+    #[test]
+    fn awakening_never_returns_a_variety_the_parents_already_have() {
+        use crate::genetics::{family, Affinity, Family};
+        let mut rng = rand::thread_rng();
+        let a = bloom(6).genes; // 眼球花
+        let b = bloom(7).genes; // 触手藤：异界科的两个品种都被父母占了
+        let mut maxed = Affinity::default();
+        for _ in 0..20 {
+            maxed.focus(Family::Eldritch);
+        }
+        // 该科已无新品种可给 → 应回落到全体稀有池，而不是空转
+        let mut saw_other_family = false;
+        for _ in 0..8000 {
+            let c = Genes::cross_with(&a, &b, &maxed, &mut rng);
+            if family(c.petal_shape) != Family::Eldritch && c.petal_shape >= 6 {
+                saw_other_family = true;
+                break;
+            }
+        }
+        assert!(
+            saw_other_family,
+            "with the family exhausted, awakening must fall back to the global rare pool"
         );
     }
 
