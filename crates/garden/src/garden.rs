@@ -275,7 +275,46 @@ impl Garden {
                 plant.vitality = (plant.vitality - dt / 86_400.0 * 0.35).max(0.15);
             }
         }
+        self.apply_neighbor_effects(dt, weather);
         self.last_tick = now();
+    }
+
+    /// 系统六轴 3：邻居关系。触手藤让两侧枯萎、曼德拉草夜间供养两侧——
+    /// "这块地留谁"因此从单株取舍升级成摆放谜题。
+    fn apply_neighbor_effects(&mut self, dt: f32, weather: &Weather) {
+        use crate::traits::{traits_of, NeighborEffect};
+        let night = weather.darkness() > 0.5;
+        // 先收集影响，再施加，避免借用冲突
+        let mut deltas = vec![0.0f32; self.plots.len()];
+        for i in 0..self.plots.len() {
+            let Some(p) = &self.plots[i] else { continue };
+            if p.stage() != Stage::Bloom {
+                continue;
+            }
+            let Some(effect) = traits_of(p.genes.petal_shape).neighbor else {
+                continue;
+            };
+            let amount = match effect {
+                NeighborEffect::Wither => -dt / 86_400.0 * 0.9,
+                NeighborEffect::Nourish if night => dt / 86_400.0 * 1.2,
+                _ => 0.0,
+            };
+            if amount == 0.0 {
+                continue;
+            }
+            for n in [i.wrapping_sub(1), i + 1] {
+                if n < self.plots.len() {
+                    deltas[n] += amount;
+                }
+            }
+        }
+        for (i, d) in deltas.iter().enumerate() {
+            if *d != 0.0 {
+                if let Some(p) = &mut self.plots[i] {
+                    p.vitality = (p.vitality + d).clamp(0.15, 1.0);
+                }
+            }
+        }
     }
 
     /// 读档后结算离线时间：生长照常，另外用 seeded RNG（以存档时间做种，

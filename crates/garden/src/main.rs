@@ -3,6 +3,7 @@ mod garden;
 mod genetics;
 mod quest;
 mod render;
+mod traits;
 mod weather;
 
 use std::io::Write;
@@ -441,10 +442,34 @@ fn draw_gallery_hud(
     cols: u16,
     garden: &Garden,
 ) -> std::io::Result<()> {
+    // 按稀有度分层统计——传说才显得像传说
+    let (mut backdrop, mut character, mut legend) = (0usize, 0usize, 0usize);
+    for v in 0..genetics::VARIETIES {
+        let found = (0..8)
+            .filter(|&r| {
+                const HUES: [f32; 8] = [0.0, 30.0, 57.0, 115.0, 180.0, 225.0, 270.0, 315.0];
+                let sp = format!("{}{}", genetics::hue_name(HUES[r]), genetics::variety_name(v));
+                garden.discovered.iter().any(|s| s == &sp)
+            })
+            .count();
+        match traits::traits_of(v).tier() {
+            traits::Tier::Backdrop => backdrop += found,
+            traits::Tier::Character => character += found,
+            traits::Tier::Legend => legend += found,
+        }
+    }
     let line1 = format!(
-        " ❀ 图鉴 {}/{} | 列：圆瓣 四瓣 星芒 重瓣 芒草 蕨叶 眼球 触手 曼德拉 金花 海葵 珊瑚 | 行：8 色系",
+        " ❀ 图鉴 {}/{} | 常见 {}/48 · 角色 {}/16 · 传说 {}/8 · 群系限定 {}/16 | 列=品种 行=8色系",
         garden.discovered.len(),
-        TOTAL_SPECIES
+        TOTAL_SPECIES,
+        backdrop,
+        character,
+        legend,
+        garden
+            .discovered
+            .iter()
+            .filter(|s| s.contains("海葵") || s.contains("珊瑚"))
+            .count(),
     );
     let line2 =
         String::from(" 剪影 = 未培育品种 | 异界/炼金科靠杂交突变，水生科来自深海群系 | [B/Esc] 返回");
@@ -527,13 +552,27 @@ fn draw_hud(
                 } else {
                     String::new()
                 };
+                // 系统六：把这一株的"规则"讲给玩家，它才是角色而不是调色板
+                let t = traits::traits_of(p.genes.petal_shape);
+                let rule = match t.neighbor {
+                    Some(traits::NeighborEffect::Wither) => " ⚠邻株枯萎",
+                    Some(traits::NeighborEffect::Nourish) => " ✦夜间滋养邻株",
+                    Some(traits::NeighborEffect::ShadeCast) => " ☂投影",
+                    None => "",
+                };
+                let tier = match t.tier() {
+                    traits::Tier::Backdrop => String::new(),
+                    other => format!("·{}", other.name()),
+                };
                 format!(
-                    "{}号地: [{}] {} {} {:.0}%{}{}",
+                    "{}号地: [{}{}] {} {} {:.0}%{}{}{}",
                     selected + 1,
                     fam,
+                    tier,
                     display_name(&p.genes),
                     stage,
                     p.progress * 100.0,
+                    rule,
                     vit,
                     pin_delta,
                 )
