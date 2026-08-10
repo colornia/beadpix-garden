@@ -79,6 +79,39 @@ pub fn hue_name(hue: f32) -> &'static str {
     }
 }
 
+/// 子代预测：杂交前显示给玩家的遗传范围。
+/// 与 `Genes::cross` 共用同一套推导（那边 roll 具体值，这边给区间），
+/// 预览和结果才互相可信——这是"可规划"的基础。
+pub struct ChildForecast {
+    /// 花色落点弧段（沿色环短弧从 lo 到 hi）
+    pub hue_lo: f32,
+    pub hue_hi: f32,
+    pub height_lo: u8,
+    pub height_hi: u8,
+    /// 发光概率：双亲 65% / 单亲 40% / 无 2%
+    pub glow_chance: f32,
+    /// 异界/炼金科系觉醒概率
+    pub rare_chance: f32,
+}
+
+pub fn predict_child(a: &Genes, b: &Genes) -> ChildForecast {
+    let dh = ((b.hue - a.hue + 540.0) % 360.0) - 180.0;
+    ChildForecast {
+        hue_lo: (a.hue + dh * 0.3).rem_euclid(360.0),
+        hue_hi: (a.hue + dh * 0.7).rem_euclid(360.0),
+        height_lo: a.height.min(b.height),
+        height_hi: a.height.max(b.height),
+        glow_chance: if a.glow && b.glow {
+            0.65
+        } else if a.glow || b.glow {
+            0.4
+        } else {
+            0.02
+        },
+        rare_chance: 0.025,
+    }
+}
+
 /// 图鉴品种名（不含发光前缀，发光是同品种的稀有形态）。
 pub fn species_name(genes: &Genes) -> String {
     format!("{}{}", hue_name(genes.hue), variety_name(genes.petal_shape))
@@ -146,8 +179,10 @@ impl Genes {
         if rng.gen_bool(0.05) {
             height = rng.gen_range(8..22);
         }
-        // 发光基因：父母任一方发光则 40% 遗传；否则 2% 突变觉醒
-        let glow = if a.glow || b.glow {
+        // 发光基因：双亲发光 65% / 单亲 40% / 无 2% 突变觉醒（与 predict_child 一致）
+        let glow = if a.glow && b.glow {
+            rng.gen_bool(0.65)
+        } else if a.glow || b.glow {
             rng.gen_bool(0.4)
         } else {
             rng.gen_bool(0.02)

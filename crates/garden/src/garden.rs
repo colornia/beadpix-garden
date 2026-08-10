@@ -248,19 +248,30 @@ impl Garden {
     }
 
     /// 杂交：指定地块与其右侧相邻地块都盛开时，产出 1 颗杂交种子（不消耗植株）。
-    pub fn cross_breed(&mut self, plot: usize, rng: &mut impl Rng) -> bool {
+    /// 返回子代基因；同时记入育种笔记——玩家玩着玩着自己摸出遗传规律。
+    pub fn cross_breed(&mut self, plot: usize, rng: &mut impl Rng) -> Option<Genes> {
+        use crate::genetics::display_name;
         if plot + 1 >= self.plots.len() {
-            return false;
+            return None;
         }
         let (Some(a), Some(b)) = (&self.plots[plot], &self.plots[plot + 1]) else {
-            return false;
+            return None;
         };
         if a.stage() != Stage::Bloom || b.stage() != Stage::Bloom {
-            return false;
+            return None;
         }
         let child = Genes::cross(&a.genes, &b.genes, rng);
-        self.seeds.push(child);
-        true
+        self.breeding_log.push(format!(
+            "{} × {} → {}",
+            display_name(&a.genes),
+            display_name(&b.genes),
+            display_name(&child)
+        ));
+        if self.breeding_log.len() > 60 {
+            self.breeding_log.remove(0);
+        }
+        self.seeds.push(child.clone());
+        Some(child)
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {

@@ -12,7 +12,7 @@ use crossterm::event::KeyCode;
 
 use beadpix::{Canvas, HalfBlockRenderer, TerminalSession};
 use garden::{Garden, Stage};
-use genetics::{display_name, family, species_name, Family};
+use genetics::{display_name, family, predict_child, species_name, Family};
 use render::Scene;
 use weather::Weather;
 
@@ -183,16 +183,33 @@ fn main() -> std::io::Result<()> {
                 };
             }
             Some(KeyCode::Char('x')) | Some(KeyCode::Char('X')) => {
-                message = if garden.cross_breed(selected, &mut rng) {
-                    // 派一只蜜蜂完成这次授粉
-                    if let (Some(a), Some(b)) =
-                        (head_of(&garden, selected), head_of(&garden, selected + 1))
-                    {
-                        scene.spawn_bee(a, b);
+                message = match garden.cross_breed(selected, &mut rng) {
+                    Some(child) => {
+                        // 派一只蜜蜂完成这次授粉
+                        if let (Some(a), Some(b)) =
+                            (head_of(&garden, selected), head_of(&garden, selected + 1))
+                        {
+                            scene.spawn_bee(a, b);
+                        }
+                        format!("授粉成功！获得种子：{}（已记入育种笔记）", display_name(&child))
                     }
-                    String::from("授粉成功！诞生了一颗杂交种子。")
-                } else {
-                    String::from("杂交需要当前地块和右侧地块都开着花。")
+                    None => String::from("杂交需要当前地块和右侧地块都开着花。"),
+                };
+            }
+            Some(KeyCode::Char('p')) | Some(KeyCode::Char('P')) => {
+                // 钉目标表型：以选中植株为参照做定向育种
+                message = match &garden.plots[selected] {
+                    Some(p) => {
+                        garden.pinned = Some(p.genes.clone());
+                        format!("已钉住目标表型：{}。HUD 会显示其他植株与它的差距。", display_name(&p.genes))
+                    }
+                    None => {
+                        if garden.pinned.take().is_some() {
+                            String::from("已取消目标表型。")
+                        } else {
+                            String::from("在一株植物上按 P 可钉住它作为育种目标。")
+                        }
+                    }
                 };
             }
             _ => {}
@@ -377,31 +394,67 @@ fn draw_hud(
     message: &str,
     fast: bool,
 ) -> std::io::Result<()> {
-    let info = match &garden.plots[selected] {
-        Some(p) => {
-            let stage = match p.stage() {
-                Stage::Seed => "种子",
-                Stage::Sprout => "幼苗",
-                Stage::Bud => "花苞",
-                Stage::Bloom => "盛开",
-            };
-            let fam = match family(p.genes.petal_shape) {
-                Family::Flora => "花卉",
-                Family::Herb => "草蕨",
-                Family::Eldritch => "异界",
-                Family::Alchemy => "炼金",
-                Family::Aquatic => "水生",
-            };
-            format!(
-                "{}号地: [{}] {} {} {:.0}%",
-                selected + 1,
-                fam,
-                display_name(&p.genes),
-                stage,
-                p.progress * 100.0,
-            )
+    // 杂交预览优先：当前块与右侧块都盛开时，显示子代预测范围
+    let preview = garden.plots.get(selected).and_then(|s| s.as_ref()).and_then(|a| {
+        garden
+            .plots
+            .get(selected + 1)
+            .and_then(|s| s.as_ref())
+            .filter(|b| a.stage() == Stage::Bloom && b.stage() == Stage::Bloom)
+            .map(|b| predict_child(&a.genes, &b.genes))
+    });
+    let info = if let Some(f) = preview {
+        format!(
+            "[X]杂交预览: 色相{:.0}°~{:.0}° 株高{}-{} 发光{:.0}% 稀有觉醒{:.1}%",
+            f.hue_lo,
+            f.hue_hi,
+            f.height_lo,
+            f.height_hi,
+            f.glow_chance * 100.0,
+            f.rare_chance * 100.0
+        )
+    } else {
+        match &garden.plots[selected] {
+            Some(p) => {
+                let stage = match p.stage() {
+                    Stage::Seed => "种子",
+                    Stage::Sprout => "幼苗",
+                    Stage::Bud => "花苞",
+                    Stage::Bloom => "盛开",
+                };
+                let fam = match family(p.genes.petal_shape) {
+                    Family::Flora => "花卉",
+                    Family::Herb => "草蕨",
+                    Family::Eldritch => "异界",
+                    Family::Alchemy => "炼金",
+                    Family::Aquatic => "水生",
+                };
+                // 钉了目标表型时显示与目标的差距（定向育种导航）
+                let pin_delta = garden
+                    .pinned
+                    .as_ref()
+                    .map(|t| {
+                        let dh = ((t.hue - p.genes.hue + 540.0) % 360.0 - 180.0).abs();
+                        format!(
+                            " |距目标:色差{:.0}° 高差{} 发光{}",
+                            dh,
+                            (t.height as i32 - p.genes.height as i32).abs(),
+                            if t.glow == p.genes.glow { "✓" } else { "✗" }
+                        )
+                    })
+                    .unwrap_or_default();
+                format!(
+                    "{}号地: [{}] {} {} {:.0}%{}",
+                    selected + 1,
+                    fam,
+                    display_name(&p.genes),
+                    stage,
+                    p.progress * 100.0,
+                    pin_delta,
+                )
+            }
+            None => format!("{}号地: 空", selected + 1),
         }
-        None => format!("{}号地: 空", selected + 1),
     };
     let expand_hint = match garden.expand_cost() {
         Some(c) => format!("{}", c),
