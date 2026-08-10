@@ -40,6 +40,81 @@ pub enum Family {
     Celestial,
 }
 
+impl Family {
+    pub fn index(self) -> usize {
+        match self {
+            Family::Flora => 0,
+            Family::Herb => 1,
+            Family::Eldritch => 2,
+            Family::Alchemy => 3,
+            Family::Aquatic => 4,
+            Family::Celestial => 5,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Family::Flora => "花卉",
+            Family::Herb => "草蕨",
+            Family::Eldritch => "异界",
+            Family::Alchemy => "炼金",
+            Family::Aquatic => "水生",
+            Family::Celestial => "天时",
+        }
+    }
+}
+
+/// 血统亲和：**专注**培育一个科系，该科的稀有品种就更容易觉醒。
+///
+/// 这把"稀有科系纯看运气"变成了可经营的策略：想补全异界科的空格，
+/// 就连着拿异界的花互配——代价是其他科的亲和会流失。
+/// 决定"这一轮专攻哪一科"因此成为一个真实的取舍。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Affinity {
+    pub levels: [u32; 6],
+}
+
+/// 亲和上限。
+pub const AFFINITY_MAX: u32 = 8;
+
+impl Affinity {
+    pub fn level(&self, f: Family) -> u32 {
+        self.levels[f.index()]
+    }
+
+    /// 同科配种：该科 +1（封顶），其余各 -1（地板 0）——专注是有代价的。
+    pub fn focus(&mut self, f: Family) {
+        for (i, lv) in self.levels.iter_mut().enumerate() {
+            if i == f.index() {
+                *lv = (*lv + 1).min(AFFINITY_MAX);
+            } else {
+                *lv = lv.saturating_sub(1);
+            }
+        }
+    }
+
+    /// 该科稀有品种的觉醒概率：基础 2.5%，满亲和约 12%。
+    pub fn rare_chance(&self, f: Family) -> f64 {
+        0.025 + self.level(f) as f64 * 0.012
+    }
+
+    /// 目前专注的科系（等级最高且 > 0）。
+    pub fn focused(&self) -> Option<(Family, u32)> {
+        const ALL: [Family; 6] = [
+            Family::Flora,
+            Family::Herb,
+            Family::Eldritch,
+            Family::Alchemy,
+            Family::Aquatic,
+            Family::Celestial,
+        ];
+        ALL.iter()
+            .map(|&f| (f, self.level(f)))
+            .filter(|&(_, lv)| lv > 0)
+            .max_by_key(|&(_, lv)| lv)
+    }
+}
+
 pub fn family(variety: u8) -> Family {
     match variety % VARIETIES {
         0..=3 => Family::Flora,
@@ -105,12 +180,20 @@ pub struct ChildForecast {
     pub height_hi: u8,
     /// 发光概率：双亲 65% / 单亲 40% / 无 2%
     pub glow_chance: f32,
-    /// 异界/炼金科系觉醒概率
+    /// 稀有品种觉醒概率（同科配种时含血统亲和加成）
     pub rare_chance: f32,
+    /// 这次配种在积累哪一科的亲和（异科配种为 None）
+    pub affinity_family: Option<Family>,
+    /// 该科当前亲和等级
+    pub affinity_level: u32,
 }
 
-pub fn predict_child(a: &Genes, b: &Genes) -> ChildForecast {
+/// 同科配种时显示的是**受血统亲和加成后**的觉醒率，
+/// 与 `Genes::cross_with` 用的是同一个 `Affinity::rare_chance`。
+pub fn predict_child(a: &Genes, b: &Genes, aff: &Affinity) -> ChildForecast {
     let dh = ((b.hue - a.hue + 540.0) % 360.0) - 180.0;
+    let fa = family(a.petal_shape);
+    let same_family = fa == family(b.petal_shape);
     ChildForecast {
         hue_lo: (a.hue + dh * 0.3).rem_euclid(360.0),
         hue_hi: (a.hue + dh * 0.7).rem_euclid(360.0),
@@ -123,7 +206,14 @@ pub fn predict_child(a: &Genes, b: &Genes) -> ChildForecast {
         } else {
             0.02
         },
-        rare_chance: 0.025,
+        // 同科配种走"该科亲和"，异科配种没有专注加成
+        rare_chance: if same_family {
+            aff.rare_chance(fa) as f32
+        } else {
+            0.025
+        },
+        affinity_family: if same_family { Some(fa) } else { None },
+        affinity_level: if same_family { aff.level(fa) } else { 0 },
     }
 }
 
@@ -165,9 +255,15 @@ impl Genes {
         }
     }
 
+    /// 杂交（无血统加成）：自交、离线野蜂授粉等场合用这个。
+    pub fn cross(a: &Genes, b: &Genes, rng: &mut impl Rng) -> Self {
+        Self::cross_with(a, b, &Affinity::default(), rng)
+    }
+
     /// 杂交：每个基因随机取自父母一方并混合，5% 概率突变。
     /// 稀有花型和极端株高只能靠杂交/突变获得。
-    pub fn cross(a: &Genes, b: &Genes, rng: &mut impl Rng) -> Self {
+    /// 同科配种时，该科的觉醒率吃 `Affinity` 加成（与 predict_child_with 一致）。
+    pub fn cross_with(a: &Genes, b: &Genes, aff: &Affinity, rng: &mut impl Rng) -> Self {
         fn mix(x: f32, y: f32, rng: &mut impl Rng) -> f32 {
             x + (y - x) * rng.gen_range(0.3..0.7)
         }
@@ -185,12 +281,27 @@ impl Genes {
         if rng.gen_bool(0.05) {
             saturation = rng.gen_range(0.5..1.0);
         }
-        // 品种突变：普通池常见，异界/炼金极稀有，水生只从水生血统变出
+        // 品种突变：普通池常见，稀有科系走"该科亲和"加成的概率。
+        // 同科配种才吃加成——专注培育一个科系，它的空格才补得快
+        let fa = family(a.petal_shape);
+        let same_family = fa == family(b.petal_shape);
+        let boosted = |f: Family| -> f64 {
+            if same_family && fa == f {
+                aff.rare_chance(f)
+            } else {
+                0.025
+            }
+        };
         if rng.gen_bool(0.06) {
             petal_shape = [0, 1, 2, 3, 4, 5][rng.gen_range(0..6)];
-        } else if rng.gen_bool(0.025) {
-            petal_shape = [6, 7, 8, 9][rng.gen_range(0..4)]; // 异界 / 炼金觉醒
-        } else if rng.gen_bool(0.02) {
+        } else if rng.gen_bool(boosted(Family::Eldritch).max(boosted(Family::Alchemy))) {
+            // 异界 / 炼金觉醒：专注哪一科，就更容易出那一科
+            petal_shape = match (same_family, fa) {
+                (true, Family::Eldritch) => [6, 7][rng.gen_range(0..2)],
+                (true, Family::Alchemy) => [8, 9][rng.gen_range(0..2)],
+                _ => [6, 7, 8, 9][rng.gen_range(0..4)],
+            };
+        } else if rng.gen_bool(boosted(Family::Celestial).min(0.12)) {
             // 天时科觉醒。**陨星花(15) 不在此列**——它只能由流星带来
             petal_shape = [12, 13, 14, 16][rng.gen_range(0..4)];
         }

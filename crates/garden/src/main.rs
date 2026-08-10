@@ -616,17 +616,28 @@ fn draw_hud(
             .get(selected + 1)
             .and_then(|s| s.as_ref())
             .filter(|b| a.stage() == Stage::Bloom && b.stage() == Stage::Bloom)
-            .map(|b| predict_child(&a.genes, &b.genes))
+            .map(|b| predict_child(&a.genes, &b.genes, &garden.affinity))
     });
     let info = if let Some(f) = preview {
+        // 同科配种时把亲和加成显出来，"专攻一科"才成为看得见的策略
+        let aff = match f.affinity_family {
+            Some(fam) => format!(
+                " |{}血统 Lv{}{}",
+                fam.name(),
+                f.affinity_level,
+                if f.affinity_level < genetics::AFFINITY_MAX { "↑" } else { "(满)" }
+            ),
+            None => String::from(" |异科配种·无血统加成"),
+        };
         format!(
-            "[X]杂交预览: 色相{:.0}°~{:.0}° 株高{}-{} 发光{:.0}% 稀有觉醒{:.1}%",
+            "[X]杂交预览: 色相{:.0}°~{:.0}° 株高{}-{} 发光{:.0}% 稀有觉醒{:.1}%{}",
             f.hue_lo,
             f.hue_hi,
             f.height_lo,
             f.height_hi,
             f.glow_chance * 100.0,
-            f.rare_chance * 100.0
+            f.rare_chance * 100.0,
+            aff
         )
     } else {
         match &garden.plots[selected] {
@@ -755,8 +766,12 @@ fn draw_hud(
             genetics::variety_name(genetics::guest_variety(quest::current_week())),
         )
     } else {
+        let focus = match garden.affinity.focused() {
+            Some((f, lv)) => format!(" 专攻{}Lv{}", f.name(), lv),
+            None => String::new(),
+        };
         format!(
-            " {} · {}·{}{} | 种子x{} 堆肥x{}(扩张需{}) | 图鉴{}/{} | {}",
+            " {} · {}·{}{} | 种子x{} 堆肥x{}(扩张需{}){} | 图鉴{}/{} | {}",
             garden.biome.name(),
             weather.period_name(),
             weather.name(),
@@ -764,6 +779,7 @@ fn draw_hud(
             garden.seeds.len(),
             garden.compost,
             expand_hint,
+            focus,
             garden.discovered.len(),
             TOTAL_SPECIES,
             info

@@ -153,6 +153,9 @@ pub struct Garden {
     /// 未摆放的装饰库存（委托奖励发到这里）
     #[serde(default)]
     pub decor_stock: Vec<crate::decor::Decoration>,
+    /// 血统亲和：专注培育某一科系会提升该科的觉醒率
+    #[serde(default)]
+    pub affinity: crate::genetics::Affinity,
     /// 当前活跃委托（每真实周轮换）
     #[serde(default)]
     pub quests: Vec<crate::quest::Quest>,
@@ -186,6 +189,7 @@ impl Garden {
             pinned: None,
             decor: vec![None; crate::decor::DECOR_SLOTS],
             decor_stock: Vec::new(),
+            affinity: Default::default(),
             quests: crate::quest::weekly_quests(crate::quest::current_week(), 3),
             quest_week: crate::quest::current_week(),
             quests_done: 0,
@@ -659,7 +663,7 @@ impl Garden {
     /// 杂交：指定地块与其右侧相邻地块都盛开时，产出 1 颗杂交种子（不消耗植株）。
     /// 返回子代基因；同时记入育种笔记——玩家玩着玩着自己摸出遗传规律。
     pub fn cross_breed(&mut self, plot: usize, rng: &mut impl Rng) -> Option<Genes> {
-        use crate::genetics::display_name;
+        use crate::genetics::{display_name, family};
         if plot + 1 >= self.plots.len() {
             return None;
         }
@@ -669,7 +673,8 @@ impl Garden {
         if a.stage() != Stage::Bloom || b.stage() != Stage::Bloom {
             return None;
         }
-        let child = Genes::cross(&a.genes, &b.genes, rng);
+        let child = Genes::cross_with(&a.genes, &b.genes, &self.affinity, rng);
+        let (fa, fb) = (family(a.genes.petal_shape), family(b.genes.petal_shape));
         self.breeding_log.push(format!(
             "{} × {} → {}",
             display_name(&a.genes),
@@ -678,6 +683,10 @@ impl Garden {
         ));
         if self.breeding_log.len() > 60 {
             self.breeding_log.remove(0);
+        }
+        // 血统亲和：同科配种积累专注度，其余各科流失
+        if fa == fb {
+            self.affinity.focus(fa);
         }
         self.seeds.push(child.clone());
         Some(child)
@@ -953,6 +962,7 @@ mod tests {
             pinned: None,
             decor: a.decor.clone(),
             decor_stock: a.decor_stock.clone(),
+            affinity: a.affinity.clone(),
             quests: a.quests.clone(),
             quest_week: a.quest_week,
             quests_done: a.quests_done,
@@ -1063,6 +1073,83 @@ mod tests {
         assert!(
             g.plots[0].as_ref().unwrap().progress > 0.0,
             "storm seed should sprout once it rains"
+        );
+    }
+
+    #[test]
+    fn same_family_crossing_builds_affinity_and_drains_the_rest() {
+        use crate::genetics::{family, Family, AFFINITY_MAX};
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+
+        // 先攒一点异界亲和
+        g.plots[0] = Some(bloom(6)); // 眼球花
+        g.plots[1] = Some(bloom(7)); // 触手藤（同为异界科）
+        for _ in 0..3 {
+            g.cross_breed(0, &mut rng).unwrap();
+        }
+        assert_eq!(g.affinity.level(Family::Eldritch), 3);
+        assert_eq!(g.affinity.focused(), Some((Family::Eldritch, 3)));
+
+        // 改攻花卉科：花卉涨，异界流失——专注是有代价的
+        g.plots[0] = Some(bloom(0));
+        g.plots[1] = Some(bloom(1));
+        g.cross_breed(0, &mut rng).unwrap();
+        assert_eq!(g.affinity.level(Family::Flora), 1);
+        assert_eq!(g.affinity.level(Family::Eldritch), 2);
+
+        // 异科配种不积累任何亲和
+        g.plots[0] = Some(bloom(0)); // 花卉
+        g.plots[1] = Some(bloom(6)); // 异界
+        assert_ne!(family(0), family(6));
+        let before = g.affinity.clone();
+        g.cross_breed(0, &mut rng).unwrap();
+        assert_eq!(before.levels, g.affinity.levels);
+
+        // 封顶
+        g.plots[0] = Some(bloom(0));
+        g.plots[1] = Some(bloom(1));
+        for _ in 0..30 {
+            g.cross_breed(0, &mut rng).unwrap();
+        }
+        assert_eq!(g.affinity.level(Family::Flora), AFFINITY_MAX);
+    }
+
+    /// 纪律：遗传预览与真实杂交必须同源。亲和拉高预览里的觉醒率时，
+    /// 真实杂交的产出率也必须跟着涨，否则预览就是在骗人。
+    #[test]
+    fn affinity_raises_both_the_forecast_and_the_real_odds() {
+        use crate::genetics::{family, predict_child, Affinity, Family};
+        let mut rng = rand::thread_rng();
+        let a = bloom(6).genes; // 异界
+        let b = bloom(7).genes; // 异界
+
+        let none = Affinity::default();
+        let mut maxed = Affinity::default();
+        for _ in 0..20 {
+            maxed.focus(Family::Eldritch);
+        }
+
+        // 预览：亲和拉高了觉醒率
+        let f0 = predict_child(&a, &b, &none);
+        let f1 = predict_child(&a, &b, &maxed);
+        assert_eq!(f0.affinity_family, Some(Family::Eldritch));
+        assert!(f1.rare_chance > f0.rare_chance * 3.0);
+
+        // 实际：满亲和时真的更常出异界科
+        let count = |aff: &Affinity, rng: &mut rand::rngs::ThreadRng| {
+            (0..4000)
+                .filter(|_| {
+                    let c = Genes::cross_with(&a, &b, aff, rng);
+                    family(c.petal_shape) == Family::Eldritch && c.petal_shape != a.petal_shape
+                })
+                .count()
+        };
+        let lo = count(&none, &mut rng);
+        let hi = count(&maxed, &mut rng);
+        assert!(
+            hi > lo,
+            "maxed affinity should yield more eldritch awakenings ({hi} vs {lo})"
         );
     }
 
