@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::KeyCode;
 
 use beadpix::{Canvas, HalfBlockRenderer, TerminalSession};
-use garden::{Garden, Stage, PLOTS};
+use garden::{Garden, Stage};
 use genetics::{display_name, family, species_name, Family};
 use render::Scene;
 use weather::Weather;
@@ -75,7 +75,13 @@ fn main() -> std::io::Result<()> {
     let mut gallery = false;
     // 花头位置：锚点上方株高处（蜜蜂和迸发粒子的目标点）
     let head_of = |garden: &Garden, i: usize| -> Option<(f32, f32)> {
-        let pts = render::anchors(garden.biome, canvas_w, canvas_h, garden.world_seed);
+        let pts = render::anchors(
+            garden.biome,
+            canvas_w,
+            canvas_h,
+            garden.world_seed,
+            garden.plots.len(),
+        );
         garden.plots[i]
             .as_ref()
             .map(|p| (pts[i].0 as f32, (pts[i].1 - p.genes.height as i32) as f32))
@@ -109,16 +115,18 @@ fn main() -> std::io::Result<()> {
                 renderer.invalidate();
             }
             Some(KeyCode::Left) => selected = selected.saturating_sub(1),
-            Some(KeyCode::Right) => selected = (selected + 1).min(PLOTS - 1),
-            // 3/4 视角下前后排切换（后排 0-3，前排 4-7）
+            Some(KeyCode::Right) => selected = (selected + 1).min(garden.plots.len() - 1),
+            // 3/4 视角下前后排切换（后排先分满）
             Some(KeyCode::Up) => {
-                if selected >= 4 {
-                    selected -= 4;
+                let back_n = garden.plots.len().div_ceil(2);
+                if selected >= back_n {
+                    selected -= back_n;
                 }
             }
             Some(KeyCode::Down) => {
-                if selected < 4 {
-                    selected += 4;
+                let back_n = garden.plots.len().div_ceil(2);
+                if selected < back_n {
+                    selected = (selected + back_n).min(garden.plots.len() - 1);
                 }
             }
             Some(KeyCode::Enter) => {
@@ -143,6 +151,35 @@ fn main() -> std::io::Result<()> {
                     String::from("收获了！获得了继承它基因的种子。")
                 } else {
                     String::from("这里没有盛开的花可以收获。")
+                };
+            }
+            Some(KeyCode::Char('c')) | Some(KeyCode::Char('C')) => {
+                // 退役换堆肥：先记名字再操作
+                let name = garden.plots[selected]
+                    .as_ref()
+                    .map(|p| display_name(&p.genes));
+                message = match garden.compost_plant(selected, &mut rng) {
+                    Some(v) => format!(
+                        "「{}」化作了 {} 堆肥（现有 {}）。它滋养的土地会记得它。",
+                        name.unwrap_or_default(),
+                        v,
+                        garden.compost
+                    ),
+                    None => String::from("只有盛开的植株可以退役堆肥。"),
+                };
+            }
+            Some(KeyCode::Char('e')) | Some(KeyCode::Char('E')) => {
+                message = match garden.expand_cost() {
+                    None => String::from("花园已达最大规模（16 块地）。"),
+                    Some(cost) if garden.expand() => {
+                        format!("花园扩张到 {} 块地！（花费 {} 堆肥）", garden.plots.len(), cost)
+                    }
+                    Some(cost) => format!(
+                        "扩张第 {} 块地需要 {} 堆肥（现有 {}）。退役盛开的植株 [C] 可获得堆肥。",
+                        garden.plots.len() + 1,
+                        cost,
+                        garden.compost
+                    ),
                 };
             }
             Some(KeyCode::Char('x')) | Some(KeyCode::Char('X')) => {
@@ -254,19 +291,23 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
     for (biome, tag, clock, rainbow, shapes) in shots {
         let stages = [1.0, 0.3, 0.6, 1.0, 1.0, 1.0, 1.0, 0.9];
         let hues = [0.0f32, 120.0, 210.0, 25.0, 55.0, 210.0, 300.0, 160.0];
-        for i in 0..garden::PLOTS {
-            g.plots[i] = Some(Plant {
-                genes: Genes {
-                    hue: hues[i],
-                    saturation: 0.8,
-                    petal_shape: shapes[i],
-                    height: 10 + (i as u8 % 4) * 3,
-                    growth_rate: 1.0,
-                    glow: i == 6, // 第 7 株带发光基因，展示光效
-                },
-                progress: stages[i],
-            });
-        }
+        g.plots = (0..8)
+            .map(|i| {
+                Some(Plant {
+                    genes: Genes {
+                        hue: hues[i],
+                        saturation: 0.8,
+                        petal_shape: shapes[i],
+                        height: 10 + (i as u8 % 4) * 3,
+                        growth_rate: 1.0,
+                        glow: i == 6, // 第 7 株带发光基因，展示光效
+                    },
+                    progress: stages[i],
+                    vitality: 1.0,
+                    last_care: 0,
+                })
+            })
+            .collect();
         g.biome = biome;
         g.world_seed = 12345;
         let ground_y = canvas_h as f32 * render::ground_frac(biome);
@@ -362,19 +403,25 @@ fn draw_hud(
         }
         None => format!("{}号地: 空", selected + 1),
     };
+    let expand_hint = match garden.expand_cost() {
+        Some(c) => format!("{}", c),
+        None => String::from("满"),
+    };
     let line1 = format!(
-        " {} · {}·{}{} | 种子 x{} | 图鉴 {}/{} | {}",
+        " {} · {}·{}{} | 种子x{} 堆肥x{}(扩张需{}) | 图鉴{}/{} | {}",
         garden.biome.name(),
         weather.period_name(),
         weather.name(),
-        if fast { " [测试模式 x20]" } else { "" },
+        if fast { " [x20]" } else { "" },
         garden.seeds.len(),
+        garden.compost,
+        expand_hint,
         garden.discovered.len(),
         TOTAL_SPECIES,
         info
     );
     let line2 = format!(
-        " [←→↑↓]选地块 [回车]播种 [H]收获 [X]杂交 [B]图鉴 [Esc]保存退出 | {}",
+        " [←→↑↓]选 [回车]种 [H]收 [X]杂交 [C]堆肥 [E]扩张 [B]图鉴 [Esc]退出 | {}",
         message
     );
     let width = cols as usize;

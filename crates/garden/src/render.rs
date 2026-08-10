@@ -1,6 +1,6 @@
 use beadpix::{Canvas, Palette, Rgb, Sprite};
 
-use crate::garden::{Biome, Garden, Plant, Stage, PLOTS};
+use crate::garden::{Biome, Garden, Plant, Stage};
 use crate::weather::{Kind, Weather};
 
 /// "主地面"高度比例：雨滴水花落点、蝴蝶活动带的基准。
@@ -43,28 +43,37 @@ fn soft_circle(canvas: &mut Canvas, cx: i32, cy: i32, r: i32, color: Rgb, max_al
     }
 }
 
-/// 每株植物的锚点。草甸/林间是 3/4 视角双排花田（前 4 后 4，前排遮挡后排）；
-/// 石缝是岩壁上错落的岩架。pub 供主程序计算花头位置（粒子/蜜蜂的目标点）。
-pub fn anchors(biome: Biome, w: u32, h: u32, seed: u32) -> Vec<(i32, i32)> {
-    (0..PLOTS)
+/// 每株植物的锚点（数量随扩张增长）。草甸/林间/深海是 3/4 视角双排花田
+/// （后排先分满，前排遮挡后排）；石缝是岩壁上错落的岩架。
+/// pub 供主程序计算花头位置（粒子/蜜蜂的目标点）。
+pub fn anchors(biome: Biome, w: u32, h: u32, seed: u32, count: usize) -> Vec<(i32, i32)> {
+    let back_n = count.div_ceil(2);
+    let front_n = count - back_n;
+    (0..count)
         .map(|i| match biome {
             Biome::Meadow | Biome::Forest | Biome::Abyss => {
-                let col = (i % 4) as f32;
-                let back = i < 4;
-                let spacing = w as f32 / 4.0;
+                let back = i < back_n;
+                let (col, row_n) = if back {
+                    (i, back_n)
+                } else {
+                    (i - back_n, front_n)
+                };
+                let spacing = w as f32 / row_n.max(1) as f32;
                 // 前排相对后排错半格，避免正对遮挡
-                let x = spacing * col + spacing / 2.0 + if back { 0.0 } else { spacing * 0.28 };
+                let x = spacing * col as f32
+                    + spacing / 2.0
+                    + if back { 0.0 } else { spacing * 0.22 };
                 let jitter = (hash(i as i32, seed as i32) % 3) as i32 - 1;
                 let y = if back { h as f32 * 0.68 } else { h as f32 * 0.85 };
-                (x as i32 + jitter, y as i32)
+                ((x as i32 + jitter).clamp(4, w as i32 - 5), y as i32)
             }
             Biome::Crevice => {
-                let spacing = w as f32 / PLOTS as f32;
+                let spacing = w as f32 / count.max(1) as f32;
                 let base_x = (spacing * i as f32 + spacing / 2.0) as i32;
                 let hi = hash(i as i32 * 7 + 3, seed as i32);
                 let jitter = (hash(i as i32, seed as i32) % 5) as i32 - 2;
                 let y = h as f32 * (0.42 + (hi % 1000) as f32 / 1000.0 * 0.42);
-                (base_x + jitter, y as i32)
+                ((base_x + jitter).clamp(4, w as i32 - 5), y as i32)
             }
         })
         .collect()
@@ -189,7 +198,7 @@ impl Scene {
         }
 
         // --- 植株（按锚点顺序绘制：后排先画，前排自然遮挡）---
-        let pts = anchors(biome, w, h, seed);
+        let pts = anchors(biome, w, h, seed, garden.plots.len());
         let mut blooms: Vec<(i32, i32, Rgb, bool, u8)> = Vec::new();
         for (i, slot) in garden.plots.iter().enumerate() {
             let (ax, ay) = pts[i];
@@ -468,6 +477,8 @@ impl Scene {
                         glow: false,
                     },
                     progress: 1.0,
+                    vitality: 1.0,
+                    last_care: 0,
                 };
                 tmp.clear(MAGIC);
                 self.draw_plant(
