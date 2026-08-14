@@ -1,6 +1,6 @@
 use beadpix::{Canvas, Palette, PickBuffer, Rgb, Sprite};
 
-use crate::decor::{decor_anchors, Decoration};
+use crate::decor::Decoration;
 use crate::garden::{Biome, Garden, Plant, Stage};
 use crate::weather::{Kind, Weather};
 
@@ -23,8 +23,8 @@ type LightSource = (i32, i32, i32, (f32, f32, f32));
 pub enum PickTarget {
     /// 地块（含其中的植株）
     Bed(usize),
-    /// 布景槽位
-    DecorSlot(usize),
+    /// 已摆放的布景（decor_items 下标）
+    Decor(usize),
     /// 图鉴格：(列, 行)
     DexCell(usize, usize),
 }
@@ -231,26 +231,18 @@ impl Scene {
         // 雷纹花的发芽与电弧绑定这个值
         let raining0 = weather.kind == Kind::Rain;
 
-        // --- 布景：先于植株绘制，前排植株自然盖住它们 ---
-        let dpts = decor_anchors(biome, w, h, seed);
-        for (i, &(dx, dy)) in dpts.iter().enumerate() {
-            // 空槽位也要能点中（不然摆不上第一件），热区比装饰本体略大
-            self.pick
-                .paint_around(dx, dy - 3, 5, 5, PickTarget::DecorSlot(i));
-            let Some(d) = garden.decor.get(i).and_then(|d| *d) else {
-                continue;
-            };
+        // --- 布景：先于植株绘制，前排植株自然盖住它们（自由坐标，可拖拽）---
+        for (i, item) in garden.decor_items.iter().enumerate() {
+            let (dx, dy) = item.pixel(w, h);
+            self.pick.paint_around(dx, dy - 3, 5, 5, PickTarget::Decor(i));
             let dwind = weather.wind() * gust(time, dx);
-            self.draw_decor(canvas, d, dx, dy, time, dwind, dark0, &mut lights);
-        }
-        // 布景模式下高亮当前槽位
-        if let Some(sel) = decor_cursor {
-            if let Some(&(dx, dy)) = dpts.get(sel) {
-                let blink = ((time * 4.0).sin() * 0.5 + 0.5) * 220.0;
-                for k in -2..=2i32 {
+            self.draw_decor(canvas, item.kind, dx, dy, time, dwind, dark0, &mut lights);
+            // 布景模式下给每件描个底，看得出哪些是可拖的
+            if decor_cursor.is_some() {
+                let blink = ((time * 4.0).sin() * 0.5 + 0.5) * 160.0 + 60.0;
+                for k in -3..=3i32 {
                     canvas.blend(dx + k, dy + 2, Rgb::new(255, 240, 180), blink as u8);
                 }
-                canvas.blend(dx, dy + 3, Rgb::new(255, 240, 180), blink as u8);
             }
         }
 

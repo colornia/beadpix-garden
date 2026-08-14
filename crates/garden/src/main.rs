@@ -102,6 +102,9 @@ fn main() -> std::io::Result<()> {
     let mut moving: Option<usize> = None;
     // 布景模式：Some(装饰槽位)——←→ 换槽位，回车摆放/收回
     let mut decor_cursor: Option<usize> = None;
+    // 拖拽：按下时记住起点，移出起点格才算真拖，松开时决定是"点击"还是"放下"。
+    // 这样点击和拖拽共用左键而不打架。
+    let mut drag: Option<(render::PickTarget, bool)> = None;
     // 鼠标悬停：目标 + 停留起点。
     // 按 NN/g 的悬停规范分两级——立刻给轻量视觉反馈（看得出指着谁），
     // 停留够久才换 HUD 详情（避免鼠标划过时信息栏疯狂闪烁）。
@@ -144,28 +147,75 @@ fn main() -> std::io::Result<()> {
         };
         if let Some(Input::Mouse(m)) = input {
             let target = scene.pick_at(m.col, m.row);
+            // 鼠标位置换算成画布比例坐标（布景自由摆放用）
+            let frac = (
+                m.col as f32 / canvas_w as f32,
+                (m.row as f32 * 2.0) / canvas_h as f32,
+            );
             match (m.kind, target) {
-                // 点地块：先选中；点已选中的地块 = 执行它此刻最自然的动作
-                (MouseKind::LeftDown, Some(render::PickTarget::Bed(i))) => {
-                    if gallery.is_none() && decor_cursor.is_none() {
-                        if selected == i {
-                            key = Some(primary_action_key(&garden, i));
-                        } else {
-                            selected = i;
+                // 按下：记住起点，先不动作——松开时才知道这是点击还是拖拽
+                (MouseKind::LeftDown, Some(t)) => {
+                    drag = Some((t, false));
+                    if let (render::PickTarget::DexCell(c, r), Some(_)) = (t, gallery) {
+                        gallery = Some((c, r));
+                    }
+                }
+                // 拖出起点格 = 真的在拖
+                (MouseKind::LeftDrag, t) => {
+                    if let Some((from, moved)) = &mut drag {
+                        if t != Some(*from) {
+                            *moved = true;
                         }
                     }
                 }
-                // 点布景槽位：进布景模式并选中它
-                (MouseKind::LeftDown, Some(render::PickTarget::DecorSlot(s))) => {
-                    if gallery.is_none() {
-                        decor_cursor = Some(s);
-                        message = String::from("布景模式：[回车]摆放 [退格]收起 [D]退出");
+                (MouseKind::LeftUp, t) => {
+                    if let Some((from, moved)) = drag.take() {
+                        match (from, moved, t) {
+                            // 拖植株到另一块地 = 移植
+                            (render::PickTarget::Bed(a), true, Some(render::PickTarget::Bed(b)))
+                                if a != b =>
+                            {
+                                message = if garden.relocate(a, b) {
+                                    selected = b;
+                                    format!("把 {} 号地的植株挪到了 {} 号地。", a + 1, b + 1)
+                                } else {
+                                    String::from("这块地是空的，没什么可挪。")
+                                };
+                            }
+                            // 拖布景到任意位置 = 自由摆放
+                            (render::PickTarget::Decor(i), true, _) => {
+                                if garden.move_decor(i, frac.0, frac.1) {
+                                    message = String::from("布景已挪好。");
+                                }
+                            }
+                            // 没拖动 = 点击
+                            (render::PickTarget::Bed(i), false, _) => {
+                                if gallery.is_none() {
+                                    if selected == i && decor_cursor.is_none() {
+                                        key = Some(primary_action_key(&garden, i));
+                                    } else {
+                                        selected = i;
+                                    }
+                                }
+                            }
+                            (render::PickTarget::Decor(i), false, _) => {
+                                if gallery.is_none() {
+                                    decor_cursor = Some(i);
+                                    message = format!(
+                                        "选中布景「{}」——拖动可挪位置，[退格]收回库存。",
+                                        garden.decor_items[i].kind.name()
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
                     }
-                }
-                // 图鉴里点格子直接查看
-                (MouseKind::LeftDown, Some(render::PickTarget::DexCell(c, r))) => {
-                    if gallery.is_some() {
-                        gallery = Some((c, r));
+                    // 布景模式下点空地 = 把库存里的下一件摆在这儿
+                    if decor_cursor.is_some() && matches!(t, Some(render::PickTarget::Bed(_)) | None)
+                    {
+                        if let Some(d) = garden.place_decor_at(frac.0, frac.1) {
+                            message = format!("摆上了「{}」——{}。", d.name(), d.hint());
+                        }
                     }
                 }
                 // 悬停：换了目标就重新计时，详情要停够 HOVER_DELAY 才显示
@@ -203,26 +253,40 @@ fn main() -> std::io::Result<()> {
                 _ => {}
             }
         } else if let Some(slot) = decor_cursor {
-            // 布景模式：把花园当画布摆东西（系统五终局）
+            // 布景模式：把花园当画布摆东西（系统五终局）。
+            // 鼠标拖拽是主要交互；键盘保留一套等价操作（←→ 选件、方向键微调位置）
+            let n = garden.decor_items.len().max(1);
             match key {
                 Some(KeyCode::Esc) | Some(KeyCode::Char('d')) | Some(KeyCode::Char('D')) => {
                     decor_cursor = None;
                     message = String::from("离开布景模式。");
                 }
-                Some(KeyCode::Left) => {
-                    decor_cursor = Some((slot + decor::DECOR_SLOTS - 1) % decor::DECOR_SLOTS)
+                Some(KeyCode::Left) => decor_cursor = Some((slot + n - 1) % n),
+                Some(KeyCode::Right) => decor_cursor = Some((slot + 1) % n),
+                // 键盘微调选中件的位置（鼠标用户直接拖）
+                Some(KeyCode::Up) | Some(KeyCode::Down) => {
+                    if let Some(d) = garden.decor_items.get(slot).copied() {
+                        let dy = if key == Some(KeyCode::Up) { -0.02 } else { 0.02 };
+                        garden.move_decor(slot, d.x, d.y + dy);
+                    }
                 }
-                Some(KeyCode::Right) => decor_cursor = Some((slot + 1) % decor::DECOR_SLOTS),
                 Some(KeyCode::Enter) => {
-                    message = match garden.place_decor(slot) {
-                        Some(d) => format!("在 {} 号位摆上了「{}」——{}。", slot + 1, d.name(), d.hint()),
+                    // 摆在花园中间偏下，之后可拖到想要的位置
+                    message = match garden.place_decor_at(0.5, 0.8) {
+                        Some(d) => {
+                            decor_cursor = Some(garden.decor_items.len() - 1);
+                            format!("摆上了「{}」——{}。拖动它到想要的位置。", d.name(), d.hint())
+                        }
                         None => String::from("库存里没有可摆的布景了（完成委托可以获得）。"),
                     };
                 }
                 Some(KeyCode::Backspace) | Some(KeyCode::Delete) => {
                     message = match garden.take_decor(slot) {
-                        Some(d) => format!("收起了「{}」，放回库存。", d.name()),
-                        None => String::from("这个位置是空的。"),
+                        Some(d) => {
+                            decor_cursor = Some(slot.min(garden.decor_items.len().saturating_sub(1)));
+                            format!("收起了「{}」，放回库存。", d.name())
+                        }
+                        None => String::from("这里没有布景可收。"),
                     };
                 }
                 _ => {}
@@ -238,6 +302,18 @@ fn main() -> std::io::Result<()> {
                 decor_cursor = Some(0);
                 moving = None;
                 message = String::from("布景模式：[←→]选位置 [回车]摆放 [退格]收起 [D]退出");
+            }
+            Some(KeyCode::Tab) => {
+                garden.density = garden.density.next();
+                message = format!(
+                    "提示密度：{}。{}",
+                    garden.density.name(),
+                    match garden.density {
+                        garden::Density::Quiet => "只报名字和阶段，悬停不打扰。",
+                        garden::Density::Normal => "标注规则与状态。",
+                        garden::Density::Verbose => "悬停即时响应，并念出它碰的每条轴。",
+                    }
+                );
             }
             Some(KeyCode::Left) => selected = selected.saturating_sub(1),
             Some(KeyCode::Right) => selected = (selected + 1).min(garden.plots.len() - 1),
@@ -465,11 +541,17 @@ fn main() -> std::io::Result<()> {
                 fast,
                 hud_mode,
                 decor_cursor,
-                // 只有停留够久才让详情接管 HUD
-                if hover_since.elapsed() >= HOVER_DELAY {
-                    hover
-                } else {
-                    None
+                // 停留够久才让详情接管 HUD；密度设定改变这个门槛
+                match garden.density {
+                    garden::Density::Quiet => None, // 清净：悬停从不接管
+                    garden::Density::Verbose => hover, // 详尽：立刻响应
+                    garden::Density::Normal => {
+                        if hover_since.elapsed() >= HOVER_DELAY {
+                            hover
+                        } else {
+                            None
+                        }
+                    }
                 },
             )?;
         }
@@ -552,14 +634,17 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
         }
         w.rainbow = rainbow;
         // 布景：石灯笼是真实光源，夜景里应该能看到它照亮周围
-        g.decor = vec![
-            Some(decor::Decoration::Lantern),
-            Some(decor::Decoration::Pond),
-            Some(decor::Decoration::Fence),
-            Some(decor::Decoration::Windchime),
-            Some(decor::Decoration::Lantern),
-            Some(decor::Decoration::Birdbath),
-        ];
+        g.decor_items = [
+            (decor::Decoration::Lantern, 0.12, 0.62),
+            (decor::Decoration::Pond, 0.28, 0.90),
+            (decor::Decoration::Fence, 0.44, 0.72),
+            (decor::Decoration::Windchime, 0.60, 0.60),
+            (decor::Decoration::Lantern, 0.78, 0.88),
+            (decor::Decoration::Birdbath, 0.92, 0.70),
+        ]
+        .into_iter()
+        .map(|(kind, x, y)| decor::Placed { kind, x, y })
+        .collect();
         scene.draw(&mut canvas, &g, &w, 2, 1.5, 0.033, None, None, None);
         let name = format!("garden_{}.bmp", tag);
         bmp::write_bmp(&Path::new(dir).join(&name), &canvas, 6)?;
@@ -794,8 +879,26 @@ fn draw_hud(
 
 /// 一块地的完整描述。选中和**鼠标悬停**共用它——
 /// 悬停即可读出这一株是什么、碰了哪条轴、为什么还没发芽。
+///
+/// 详略随 `garden.density`：清净只报名字和阶段，详尽会把它碰的每条轴都念出来。
 fn describe_bed(garden: &Garden, idx: usize) -> String {
+    let density = garden.density;
     match garden.plots.get(idx).and_then(|s| s.as_ref()) {
+        Some(p) if density == garden::Density::Quiet => {
+            let stage = match p.stage() {
+                Stage::Seed => "种子",
+                Stage::Sprout => "幼苗",
+                Stage::Bud => "花苞",
+                Stage::Bloom => "盛开",
+            };
+            format!(
+                "{}号地: {} {} {:.0}%",
+                idx + 1,
+                display_name(&p.genes),
+                stage,
+                p.progress * 100.0
+            )
+        }
         Some(p) => {
                 let stage = match p.stage() {
                     Stage::Seed => "种子",
@@ -861,8 +964,19 @@ fn describe_bed(garden: &Garden, idx: usize) -> String {
                 } else {
                     ""
                 };
+                // 详尽模式：把它碰的每一条轴都念出来（图鉴里那套自述）
+                let axes = if density == garden::Density::Verbose {
+                    let r = t.reasons();
+                    if r.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ◆{}", r.join("；"))
+                    }
+                } else {
+                    String::new()
+                };
                 format!(
-                    "{}号地: [{}{}] {} {} {:.0}%{}{}{}{}{}",
+                    "{}号地: [{}{}] {} {} {:.0}%{}{}{}{}{}{}",
                     idx + 1,
                     fam,
                     tier,
@@ -874,6 +988,7 @@ fn describe_bed(garden: &Garden, idx: usize) -> String {
                     rule,
                     vit,
                     pin_delta,
+                    axes,
                 )
         }
         None => format!("{}号地: 空", idx + 1),
@@ -895,16 +1010,15 @@ fn draw_hud_lines(
     expand_hint: String,
 ) -> std::io::Result<()> {
     let line1 = if let Some(slot) = decor_cursor {
-        // 布景面板
-        let here = garden.decor.get(slot).and_then(|d| *d);
+        // 布景面板：自由摆放，拖拽是主要交互
+        let here = garden.decor_items.get(slot);
         let stock: Vec<&str> = garden.decor_stock.iter().map(|d| d.name()).collect();
         format!(
-            " ❖布景 {}/{} 号位: {} | 库存: {} | 完成委托可获得新布景",
-            slot + 1,
-            decor::DECOR_SLOTS,
+            " ❖布景 已摆{}件{} | 库存: {} | 🖱拖动挪位·点空地摆放 | 完成委托可获得新布景",
+            garden.decor_items.len(),
             match here {
-                Some(d) => format!("{}（{}）", d.name(), d.hint()),
-                None => String::from("空"),
+                Some(d) => format!("，选中「{}」（{}）", d.kind.name(), d.kind.hint()),
+                None => String::new(),
             },
             if stock.is_empty() {
                 String::from("无")
@@ -955,7 +1069,8 @@ fn draw_hud_lines(
         format!(" [←→]选位置 [回车]摆放 [退格]收起 [D]退出布景 | {}", message)
     } else {
         format!(
-            " 🖱点选/再点执行·悬停查看 | [回车]种 [W]浇 [H]收 [X]杂交 [M]移植 [P]钉 [C]堆肥 [E]扩张 [D]布景 [Q]委托 [B]图鉴 [Esc]退出 | {}",
+            " 🖱点选/再点执行·拖动移植·悬停查看 | [回车]种 [W]浇 [H]收 [X]杂交 [P]钉 [C]堆肥 [E]扩张 [D]布景 [Q]委托 [B]图鉴 [Tab]{} [Esc]退出 | {}",
+            garden.density.name(),
             message
         )
     };

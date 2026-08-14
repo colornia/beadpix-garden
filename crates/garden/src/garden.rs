@@ -8,6 +8,36 @@ use serde::{Deserialize, Serialize};
 use crate::genetics::Genes;
 use crate::weather::Weather;
 
+/// 提示密度。Cogmind 把自动标注做成玩家可调项——cozy 游戏尤其需要：
+/// 有人想要规则讲清楚，有人只想安静看花。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Density {
+    /// 清净：只报名字和阶段。悬停不接管 HUD，不标注规则
+    Quiet,
+    #[default]
+    Normal,
+    /// 详尽：悬停立刻接管（不等 350ms），并列出它碰的每一条轴
+    Verbose,
+}
+
+impl Density {
+    pub fn name(self) -> &'static str {
+        match self {
+            Density::Quiet => "清净",
+            Density::Normal => "标准",
+            Density::Verbose => "详尽",
+        }
+    }
+
+    pub fn next(self) -> Density {
+        match self {
+            Density::Quiet => Density::Normal,
+            Density::Normal => Density::Verbose,
+            Density::Verbose => Density::Quiet,
+        }
+    }
+}
+
 /// 开局地块数：地块稀缺是"决定"的来源。
 pub const INITIAL_PLOTS: usize = 5;
 /// 扩张上限。
@@ -147,15 +177,21 @@ pub struct Garden {
     /// 玩家钉住的目标表型（定向育种的参照）
     #[serde(default)]
     pub pinned: Option<Genes>,
-    /// 布景：已摆放的装饰（槽位 → 装饰），系统五"花园即画布"
+    /// 旧存档的槽位式布景。**只用于迁移**，load() 会把它转成 decor_items 后清空
     #[serde(default)]
     pub decor: Vec<Option<crate::decor::Decoration>>,
+    /// 布景：自由坐标摆放的装饰，系统五"花园即画布"
+    #[serde(default)]
+    pub decor_items: Vec<crate::decor::Placed>,
     /// 未摆放的装饰库存（委托奖励发到这里）
     #[serde(default)]
     pub decor_stock: Vec<crate::decor::Decoration>,
     /// 血统亲和：专注培育某一科系会提升该科的觉醒率
     #[serde(default)]
     pub affinity: crate::genetics::Affinity,
+    /// 提示密度偏好
+    #[serde(default)]
+    pub density: Density,
     /// 当前活跃委托（每真实周轮换）
     #[serde(default)]
     pub quests: Vec<crate::quest::Quest>,
@@ -187,9 +223,11 @@ impl Garden {
             compost: 0,
             breeding_log: Vec::new(),
             pinned: None,
-            decor: vec![None; crate::decor::DECOR_SLOTS],
+            decor: Vec::new(),
+            decor_items: Vec::new(),
             decor_stock: Vec::new(),
             affinity: Default::default(),
+            density: Density::default(),
             quests: crate::quest::weekly_quests(crate::quest::current_week(), 3),
             quest_week: crate::quest::current_week(),
             quests_done: 0,
@@ -362,25 +400,40 @@ impl Garden {
         self.last_tick = now();
     }
 
-    /// 把库存里的下一件装饰摆进槽位；槽位已有东西则先收回库存（相当于替换）。
-    /// 返回摆上的那件。
-    pub fn place_decor(&mut self, slot: usize) -> Option<crate::decor::Decoration> {
-        if slot >= self.decor.len() || self.decor_stock.is_empty() {
+    /// 把库存里的下一件装饰摆到画布比例坐标 (x, y)。
+    pub fn place_decor_at(&mut self, x: f32, y: f32) -> Option<crate::decor::Decoration> {
+        if self.decor_stock.is_empty() {
             return None;
         }
-        if let Some(old) = self.decor[slot].take() {
-            self.decor_stock.push(old);
-        }
-        let d = self.decor_stock.remove(0);
-        self.decor[slot] = Some(d);
-        Some(d)
+        let kind = self.decor_stock.remove(0);
+        self.decor_items.push(crate::decor::Placed {
+            kind,
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+        });
+        Some(kind)
     }
 
-    /// 收回槽位里的装饰到库存。
-    pub fn take_decor(&mut self, slot: usize) -> Option<crate::decor::Decoration> {
-        let d = self.decor.get_mut(slot)?.take()?;
-        self.decor_stock.push(d);
-        Some(d)
+    /// 把第 i 件装饰挪到新坐标（拖拽用）。
+    pub fn move_decor(&mut self, i: usize, x: f32, y: f32) -> bool {
+        match self.decor_items.get_mut(i) {
+            Some(d) => {
+                d.x = x.clamp(0.0, 1.0);
+                d.y = y.clamp(0.0, 1.0);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 收回第 i 件装饰到库存。
+    pub fn take_decor(&mut self, i: usize) -> Option<crate::decor::Decoration> {
+        if i >= self.decor_items.len() {
+            return None;
+        }
+        let d = self.decor_items.remove(i);
+        self.decor_stock.push(d.kind);
+        Some(d.kind)
     }
 
     /// 陨星花种子：流星带来的唯一产物，天生自发光。
@@ -699,8 +752,21 @@ impl Garden {
     pub fn load(path: &Path) -> Option<Garden> {
         let text = fs::read_to_string(path).ok()?;
         let mut g: Garden = serde_json::from_str(&text).ok()?;
-        // 旧存档没有 decor 字段，serde 给的是空 Vec——补齐槽位
-        g.decor.resize(crate::decor::DECOR_SLOTS, None);
+        // 迁移：旧存档的 6 个固定槽位 → 自由坐标（按原槽位的位置就地落点）
+        if !g.decor.is_empty() {
+            for (i, slot) in g.decor.iter().enumerate() {
+                if let Some(kind) = slot {
+                    let t = (i as f32 + 0.5) / crate::decor::DECOR_SLOTS as f32;
+                    let y = match i % 3 {
+                        0 => 0.60,
+                        1 => 0.755,
+                        _ => 0.93,
+                    };
+                    g.decor_items.push(crate::decor::Placed { kind: *kind, x: t, y });
+                }
+            }
+            g.decor.clear();
+        }
         Some(g)
     }
 }
@@ -961,8 +1027,10 @@ mod tests {
             breeding_log: a.breeding_log.clone(),
             pinned: None,
             decor: a.decor.clone(),
+            decor_items: a.decor_items.clone(),
             decor_stock: a.decor_stock.clone(),
             affinity: a.affinity.clone(),
+            density: a.density,
             quests: a.quests.clone(),
             quest_week: a.quest_week,
             quests_done: a.quests_done,
@@ -1180,29 +1248,66 @@ mod tests {
     }
 
     #[test]
-    fn decor_places_takes_and_swaps_without_ever_vanishing() {
+    fn decor_places_moves_and_returns_without_ever_vanishing() {
         use crate::decor::Decoration;
         let mut rng = rand::thread_rng();
         let mut g = Garden::new(&mut rng);
-        assert_eq!(g.decor.len(), crate::decor::DECOR_SLOTS);
 
         // 库存空时摆不上任何东西
-        assert!(g.place_decor(0).is_none());
+        assert!(g.place_decor_at(0.5, 0.5).is_none());
 
         g.decor_stock.push(Decoration::Lantern);
         g.decor_stock.push(Decoration::Pond);
-        assert_eq!(g.place_decor(0), Some(Decoration::Lantern));
-        assert_eq!(g.decor[0], Some(Decoration::Lantern));
+        assert_eq!(g.place_decor_at(0.25, 0.8), Some(Decoration::Lantern));
+        assert_eq!(g.decor_items.len(), 1);
+        assert_eq!(g.decor_items[0].kind, Decoration::Lantern);
 
-        // 往已占用的位置再摆：旧的退回库存，不会凭空消失
-        assert_eq!(g.place_decor(0), Some(Decoration::Pond));
-        assert!(g.decor_stock.contains(&Decoration::Lantern));
+        // 自由挪位，坐标钳制在画布内
+        assert!(g.move_decor(0, 0.9, 1.7));
+        assert_eq!(g.decor_items[0].x, 0.9);
+        assert_eq!(g.decor_items[0].y, 1.0, "y 应被钳到 1.0 以内");
+        assert!(!g.move_decor(99, 0.5, 0.5));
 
-        // 收起后回到库存，槽位清空
-        assert_eq!(g.take_decor(0), Some(Decoration::Pond));
-        assert!(g.decor[0].is_none());
+        // 收起后回到库存，总数守恒（摆出去的 + 库存里的 = 拥有的）
+        assert_eq!(g.take_decor(0), Some(Decoration::Lantern));
+        assert!(g.decor_items.is_empty());
         assert_eq!(g.decor_stock.len(), 2);
         assert!(g.take_decor(0).is_none());
+    }
+
+    /// 旧存档的 6 固定槽位要能迁移成自由坐标，不能丢东西。
+    #[test]
+    fn old_slot_based_decor_migrates_to_free_coordinates() {
+        use crate::decor::Decoration;
+        use std::path::PathBuf;
+        let mut rng = rand::thread_rng();
+        let mut g = Garden::new(&mut rng);
+        // 伪造一份旧格式存档
+        g.decor = vec![
+            Some(Decoration::Lantern),
+            None,
+            Some(Decoration::Pond),
+            None,
+            None,
+            None,
+        ];
+        let path: PathBuf =
+            std::env::temp_dir().join(format!("beadpix_migrate_{}.json", std::process::id()));
+        g.save(&path).unwrap();
+
+        let loaded = Garden::load(&path).unwrap();
+        assert!(loaded.decor.is_empty(), "旧字段应在迁移后清空");
+        assert_eq!(loaded.decor_items.len(), 2);
+        assert!(loaded
+            .decor_items
+            .iter()
+            .any(|d| d.kind == Decoration::Lantern));
+        assert!(loaded.decor_items.iter().any(|d| d.kind == Decoration::Pond));
+        // 坐标应落在画布范围内
+        for d in &loaded.decor_items {
+            assert!((0.0..=1.0).contains(&d.x) && (0.0..=1.0).contains(&d.y));
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 经济纪律（坑 机制-1）：堆肥的唯一主用途是扩张，布景只能靠委托拿——
@@ -1213,7 +1318,7 @@ mod tests {
         let mut g = Garden::new(&mut rng);
         g.compost = 9_999;
         assert!(
-            g.decor_stock.is_empty() && g.place_decor(0).is_none(),
+            g.decor_stock.is_empty() && g.place_decor_at(0.5, 0.5).is_none(),
             "compost must never convert into decorations"
         );
     }

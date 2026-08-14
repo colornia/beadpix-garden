@@ -8,10 +8,29 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::garden::Biome;
-
-/// 布景槽位数。
+/// 旧存档里的固定槽位数（仅用于迁移到自由坐标）。
 pub const DECOR_SLOTS: usize = 6;
+
+/// 一件摆好的装饰。坐标存**画布比例**而非像素——
+/// 终端窗口大小会变，存像素会让布景在改窗口后散架。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Placed {
+    pub kind: Decoration,
+    /// 0.0..1.0，相对画布宽
+    pub x: f32,
+    /// 0.0..1.0，相对画布高
+    pub y: f32,
+}
+
+impl Placed {
+    /// 换算成当前画布的像素坐标。
+    pub fn pixel(&self, w: u32, h: u32) -> (i32, i32) {
+        (
+            (self.x.clamp(0.0, 1.0) * w as f32) as i32,
+            (self.y.clamp(0.0, 1.0) * h as f32) as i32,
+        )
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Decoration {
@@ -59,31 +78,3 @@ impl Decoration {
     }
 }
 
-/// 布景槽位坐标：与植株锚点错开，分三个景深层。
-pub fn decor_anchors(biome: Biome, w: u32, h: u32, seed: u32) -> Vec<(i32, i32)> {
-    let ground = match biome {
-        Biome::Crevice => 0.9,
-        _ => 1.0,
-    };
-    (0..DECOR_SLOTS)
-        .map(|i| {
-            let t = (i as f32 + 0.5) / DECOR_SLOTS as f32;
-            let jitter = (hash(i as i32, seed as i32) % 5) as i32 - 2;
-            let x = (w as f32 * t) as i32 + jitter;
-            // 三个景深层交替，避免连成一条线
-            let depth = match i % 3 {
-                0 => 0.60,
-                1 => 0.755,
-                _ => 0.93,
-            };
-            let y = (h as f32 * depth * ground) as i32;
-            (x.clamp(5, w as i32 - 6), y)
-        })
-        .collect()
-}
-
-fn hash(x: i32, y: i32) -> u32 {
-    let mut h = (x as u32).wrapping_mul(374_761_393) ^ (y as u32).wrapping_mul(668_265_263);
-    h ^= h >> 13;
-    h.wrapping_mul(1_274_126_177)
-}
