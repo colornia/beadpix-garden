@@ -204,6 +204,7 @@ impl Scene {
         dt: f32,
         moving: Option<usize>,
         decor_cursor: Option<usize>,
+        hovered: Option<usize>,
     ) {
         let w = canvas.width();
         let h = canvas.height();
@@ -319,6 +320,11 @@ impl Scene {
                     canvas.set(ax + 1, ay - 3, Rgb::new(96, 132, 74));
                     canvas.set(ax - 1, ay - 5, moss);
                 }
+            }
+            // 悬停：立刻给的轻量反馈——脚下一圈柔光，让你立刻看出正指着谁。
+            // 详情由 HUD 延迟 350ms 后接管（NN/g 的两级悬停规范）
+            if Some(i) == hovered && i != selected {
+                soft_circle(canvas, ax, ay + 1, 6, Rgb::new(255, 250, 225), 46);
             }
             if i == selected || Some(i) == moving {
                 let cy = ay + 4;

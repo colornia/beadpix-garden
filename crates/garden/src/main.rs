@@ -22,8 +22,12 @@ use weather::Weather;
 const FPS: u64 = 30;
 /// 画面下方保留的文字行数（HUD）
 const HUD_ROWS: u16 = 2;
-/// 图鉴总品种数：8 色系 x 14 品种（六大科系）
+/// 图鉴总品种数：8 色系 x 17 品种（六大科系）
 const TOTAL_SPECIES: usize = 136;
+/// 悬停多久才把 HUD 换成该目标的详情。
+/// NN/g 建议 0.3–0.5 秒：短于此的是"路过"，不该打断阅读。
+/// 轻量高亮是立刻给的，不受这个延迟影响。
+const HOVER_DELAY: Duration = Duration::from_millis(350);
 
 fn save_path() -> PathBuf {
     std::env::current_dir()
@@ -98,8 +102,11 @@ fn main() -> std::io::Result<()> {
     let mut moving: Option<usize> = None;
     // 布景模式：Some(装饰槽位)——←→ 换槽位，回车摆放/收回
     let mut decor_cursor: Option<usize> = None;
-    // 鼠标当前悬停到的目标（去抖用：只在变化时才更新 HUD）
+    // 鼠标悬停：目标 + 停留起点。
+    // 按 NN/g 的悬停规范分两级——立刻给轻量视觉反馈（看得出指着谁），
+    // 停留够久才换 HUD 详情（避免鼠标划过时信息栏疯狂闪烁）。
     let mut hover: Option<render::PickTarget> = None;
+    let mut hover_since = Instant::now();
     // 花头位置：锚点上方株高处（蜜蜂和迸发粒子的目标点）
     let head_of = |garden: &Garden, i: usize| -> Option<(f32, f32)> {
         let pts = render::anchors(
@@ -161,10 +168,11 @@ fn main() -> std::io::Result<()> {
                         gallery = Some((c, r));
                     }
                 }
-                // 悬停：去抖——只在指到的东西变了时才更新
+                // 悬停：换了目标就重新计时，详情要停够 HOVER_DELAY 才显示
                 (MouseKind::Moved, t) => {
                     if t != hover {
                         hover = t;
+                        hover_since = Instant::now();
                     }
                 }
                 (MouseKind::ScrollUp, _) => {
@@ -435,6 +443,11 @@ fn main() -> std::io::Result<()> {
                 dt,
                 moving,
                 decor_cursor,
+                // 立刻高亮：0.1 秒内就得让你看出指着谁（详情才延迟）
+                match hover {
+                    Some(render::PickTarget::Bed(i)) => Some(i),
+                    _ => None,
+                },
             );
         }
         renderer.present(&canvas, session.out(), 1, 1)?;
@@ -452,7 +465,12 @@ fn main() -> std::io::Result<()> {
                 fast,
                 hud_mode,
                 decor_cursor,
-                hover,
+                // 只有停留够久才让详情接管 HUD
+                if hover_since.elapsed() >= HOVER_DELAY {
+                    hover
+                } else {
+                    None
+                },
             )?;
         }
 
@@ -542,7 +560,7 @@ fn screenshot(dir: &str, rng: &mut impl rand::Rng) -> std::io::Result<()> {
             Some(decor::Decoration::Lantern),
             Some(decor::Decoration::Birdbath),
         ];
-        scene.draw(&mut canvas, &g, &w, 2, 1.5, 0.033, None, None);
+        scene.draw(&mut canvas, &g, &w, 2, 1.5, 0.033, None, None, None);
         let name = format!("garden_{}.bmp", tag);
         bmp::write_bmp(&Path::new(dir).join(&name), &canvas, 6)?;
         println!("wrote {}", name);
